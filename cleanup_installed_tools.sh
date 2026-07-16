@@ -139,7 +139,7 @@ echo ""
 # ──────────────────────────────────────────────
 echo "▶ Downloaded AI models"
 
-MODEL_DIR="$HOME/Library/Application Support/openvoice"
+MODEL_DIR="$HOME/Library/Application Support/com.openvoice.app"
 if [[ -d "$MODEL_DIR" ]]; then
   SIZE=$(du -sh "$MODEL_DIR" 2>/dev/null | cut -f1)
   echo "  Removing downloaded models (${SIZE})..."
