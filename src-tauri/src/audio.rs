@@ -24,12 +24,20 @@ impl AudioRecorder {
         }
     }
 
-    pub fn start(&mut self, output_path: PathBuf) -> Result<(), String> {
+    pub fn start(&mut self, output_path: PathBuf, device_name: &str) -> Result<(), String> {
         // Ensure any previous session is fully torn down
         let _ = self.stop();
 
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or_else(|| {
+        let device = if device_name.is_empty() {
+            None
+        } else {
+            host.input_devices()
+                .ok()
+                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false)))
+        }
+        .or_else(|| host.default_input_device())
+        .ok_or_else(|| {
             "No microphone found. Connect a mic or grant Microphone access in System Settings."
                 .to_string()
         })?;

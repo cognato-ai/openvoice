@@ -6,6 +6,8 @@ import {
   requestAccessibilityPermission,
   requestMicrophonePermission,
 } from "tauri-plugin-macos-permissions-api";
+import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
+import { isEnabled as isAutostartEnabled, enable as enableAutostart, disable as disableAutostart } from "@tauri-apps/plugin-autostart";
 import Logo from "./Logo";
 import "./Settings.css";
 
@@ -39,7 +41,27 @@ interface AppSettings {
   history_limit?: number;
   microphone?: string;
   audio_feedback?: boolean;
+  language?: string;
+  silence_threshold?: number;
+  theme?: string;
 }
+
+const LANGUAGES: [string, string][] = [
+  ["auto", "Auto-detect"],
+  ["en", "English"],
+  ["es", "Spanish"],
+  ["fr", "French"],
+  ["de", "German"],
+  ["it", "Italian"],
+  ["pt", "Portuguese"],
+  ["nl", "Dutch"],
+  ["ru", "Russian"],
+  ["zh", "Chinese"],
+  ["ja", "Japanese"],
+  ["ko", "Korean"],
+  ["hi", "Hindi"],
+  ["ar", "Arabic"],
+];
 
 interface TranscriptEntry {
   id: number;
@@ -100,6 +122,121 @@ function hotkeyLabel(hotkey: string) {
     .replace(/\+/g, " ");
 }
 
+/** Maps a KeyboardEvent.code to the key name tauri-plugin-global-shortcut
+ * expects in an accelerator string. Returns null for modifier-only codes. */
+function codeToAccelKey(code: string): string | null {
+  if (code.startsWith("Key")) return code.slice(3);
+  if (code.startsWith("Digit")) return code.slice(5);
+  if (code.startsWith("Arrow")) return code;
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code;
+  switch (code) {
+    case "Space":
+      return "Space";
+    case "Escape":
+      return "Escape";
+    case "Backspace":
+      return "Backspace";
+    case "Tab":
+      return "Tab";
+    case "Enter":
+      return "Return";
+    case "Minus":
+      return "-";
+    case "Equal":
+      return "=";
+    case "BracketLeft":
+      return "[";
+    case "BracketRight":
+      return "]";
+    case "Semicolon":
+      return ";";
+    case "Quote":
+      return "'";
+    case "Backslash":
+      return "\\";
+    case "Comma":
+      return ",";
+    case "Period":
+      return ".";
+    case "Slash":
+      return "/";
+    case "Backquote":
+      return "`";
+    default:
+      return null;
+  }
+}
+
+function ShortcutRecorder({
+  value,
+  onSave,
+}: {
+  value: string;
+  onSave: (accel: string) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [conflict, setConflict] = useState(false);
+
+  useEffect(() => {
+    if (!recording) return;
+    function onKeyDown(e: KeyboardEvent) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        setRecording(false);
+        return;
+      }
+      const mainKey = codeToAccelKey(e.code);
+      if (!mainKey) return; // waiting for a non-modifier key
+      const mods: string[] = [];
+      if (e.metaKey || e.ctrlKey) mods.push("CommandOrControl");
+      if (e.altKey) mods.push("Alt");
+      if (e.shiftKey) mods.push("Shift");
+      if (mods.length === 0) return; // require at least one modifier
+
+      const accel = [...mods, mainKey].join("+");
+      setRecording(false);
+      setChecking(true);
+      invoke<boolean>("is_shortcut_available", { accel })
+        .then((ok) => {
+          setConflict(!ok);
+          if (ok) onSave(accel);
+        })
+        .catch(() => setConflict(true))
+        .finally(() => setChecking(false));
+    }
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [recording, onSave]);
+
+  return (
+    <div className="s-field">
+      <label className="s-label">Global shortcut</label>
+      <button
+        type="button"
+        className="s-input"
+        style={{ textAlign: "left", cursor: "pointer" }}
+        onClick={() => {
+          setConflict(false);
+          setRecording(true);
+        }}
+      >
+        {recording ? "Press a key combo… (Esc to cancel)" : hotkeyLabel(value)}
+      </button>
+      {checking && <p className="s-help">Checking availability…</p>}
+      {conflict && (
+        <p className="s-help" style={{ color: "var(--danger)" }}>
+          That combo is already in use — try another.
+        </p>
+      )}
+      {!recording && !checking && !conflict && (
+        <p className="s-help">Click, then press your shortcut.</p>
+      )}
+    </div>
+  );
+}
+
 export default function Settings() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -114,7 +251,47 @@ export default function Settings() {
   const [history, setHistory] = useState<TranscriptEntry[]>([]);
   const [mics, setMics] = useState<string[]>([]);
   const [catalogTotal, setCatalogTotal] = useState(0);
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [importError, setImportError] = useState("");
   const unlistenRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    isAutostartEnabled().then(setLaunchAtLogin).catch(() => {});
+  }, []);
+
+  const toggleLaunchAtLogin = useCallback(async (checked: boolean) => {
+    try {
+      if (checked) await enableAutostart();
+      else await disableAutostart();
+      setLaunchAtLogin(checked);
+    } catch {
+      /* leave state unchanged on failure */
+    }
+  }, []);
+
+  const exportSettings = useCallback(async () => {
+    const path = await saveDialog({
+      defaultPath: "openvoice-settings.json",
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!path) return;
+    await invoke("export_settings_to", { path });
+  }, []);
+
+  const importSettings = useCallback(async () => {
+    setImportError("");
+    const path = await openDialog({
+      multiple: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!path || Array.isArray(path)) return;
+    try {
+      const next = await invoke<AppSettings>("import_settings_from", { path });
+      setSettings(next);
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     const [m, s, p, h, micList, stats] = await Promise.all([
@@ -142,6 +319,9 @@ export default function Settings() {
       audio_feedback: false,
       start_hidden: false,
       microphone: "",
+      language: "auto",
+      silence_threshold: 0.005,
+      theme: "system",
       ...s,
     });
     setPerms(p);
@@ -149,6 +329,16 @@ export default function Settings() {
     setMics(micList);
     setCatalogTotal(stats.totalListed || m.length);
   }, []);
+
+  useEffect(() => {
+    const theme = settings?.theme ?? "system";
+    const root = document.documentElement;
+    if (theme === "system") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", theme);
+    }
+  }, [settings?.theme]);
 
   useEffect(() => {
     refresh();
@@ -310,7 +500,20 @@ export default function Settings() {
       await requestAccessibilityPermission();
       // Our backend also opens the pane + AX prompt
       await invoke<boolean>("request_accessibility");
-      await new Promise((r) => setTimeout(r, 500));
+
+      // Live-repoll the OS every 750ms until it reports trusted (or we give
+      // up) instead of a single fixed-delay check — the user may take a few
+      // seconds to find and toggle the switch in System Settings.
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((r) => setTimeout(r, 750));
+        let trusted = false;
+        try {
+          trusted = await checkAccessibilityPermission();
+        } catch {
+          /* keep polling */
+        }
+        if (trusted) break;
+      }
       await refresh();
     } finally {
       setAxBusy(false);
@@ -587,14 +790,27 @@ export default function Settings() {
                 </div>
               </div>
 
+              <ShortcutRecorder
+                value={settings.hotkey}
+                onSave={(accel) => setSettings({ ...settings, hotkey: accel })}
+              />
+
               <div className="s-field">
-                <label className="s-label">Global shortcut</label>
-                <input
-                  className="s-input"
-                  value={settings.hotkey}
-                  onChange={(e) => setSettings({ ...settings, hotkey: e.target.value })}
-                />
-                <p className="s-help">Shown as {hotkeyLabel(settings.hotkey)}</p>
+                <label className="s-label">Language</label>
+                <select
+                  className="s-select"
+                  value={settings.language ?? "auto"}
+                  onChange={(e) => setSettings({ ...settings, language: e.target.value })}
+                >
+                  {LANGUAGES.map(([code, label]) => (
+                    <option key={code} value={code}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <p className="s-help">
+                  Multilingual models only — English-only models ignore this.
+                </p>
               </div>
 
               <div className="s-field">
@@ -761,6 +977,20 @@ export default function Settings() {
                 </div>
               </label>
 
+              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={launchAtLogin}
+                  onChange={(e) => toggleLaunchAtLogin(e.target.checked)}
+                />
+                <div>
+                  <div className="s-card__title">Launch at login</div>
+                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                    Start OpenVoice automatically when you log in.
+                  </p>
+                </div>
+              </label>
+
               <div className="s-field">
                 <label className="s-label">History limit</label>
                 <input
@@ -776,6 +1006,54 @@ export default function Settings() {
                     })
                   }
                 />
+              </div>
+
+              <div className="s-field">
+                <label className="s-label">Mic sensitivity</label>
+                <input
+                  className="s-input"
+                  type="range"
+                  min={0.001}
+                  max={0.03}
+                  step={0.001}
+                  value={settings.silence_threshold ?? 0.005}
+                  onChange={(e) =>
+                    setSettings({ ...settings, silence_threshold: Number(e.target.value) })
+                  }
+                />
+                <p className="s-help">
+                  Lower = picks up quieter speech (may also catch background noise).
+                </p>
+              </div>
+
+              <div className="s-field">
+                <label className="s-label">Theme</label>
+                <select
+                  className="s-select"
+                  value={settings.theme ?? "system"}
+                  onChange={(e) => setSettings({ ...settings, theme: e.target.value })}
+                >
+                  <option value="system">Match system</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+
+              <div className="s-field">
+                <label className="s-label">Settings backup</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="s-btn s-btn--ghost s-btn--sm" onClick={exportSettings}>
+                    Export…
+                  </button>
+                  <button className="s-btn s-btn--ghost s-btn--sm" onClick={importSettings}>
+                    Import…
+                  </button>
+                </div>
+                {importError && (
+                  <p className="s-help" style={{ color: "var(--danger)" }}>
+                    {importError}
+                  </p>
+                )}
               </div>
 
               <div className="s-footer-actions">

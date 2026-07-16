@@ -54,6 +54,16 @@ pub struct AppSettings {
     /// Play a short system sound when recording starts/stops
     #[serde(default)]
     pub audio_feedback: bool,
+    /// Transcription language: "auto" lets Whisper detect it, or an ISO 639-1
+    /// code (e.g. "en", "es") to force decoding in that language.
+    #[serde(default = "default_language")]
+    pub language: String,
+    /// RMS level below which audio is treated as silence and skipped.
+    #[serde(default = "default_silence_threshold")]
+    pub silence_threshold: f32,
+    /// "system" | "light" | "dark"
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 fn default_true() -> bool {
@@ -61,6 +71,15 @@ fn default_true() -> bool {
 }
 fn default_history_limit() -> u32 {
     50
+}
+fn default_language() -> String {
+    "auto".into()
+}
+fn default_silence_threshold() -> f32 {
+    0.005
+}
+fn default_theme() -> String {
+    "system".into()
 }
 
 impl Default for AppSettings {
@@ -78,6 +97,9 @@ impl Default for AppSettings {
             history_limit: 50,
             microphone: String::new(),
             audio_feedback: false,
+            language: default_language(),
+            silence_threshold: default_silence_threshold(),
+            theme: default_theme(),
         }
     }
 }
@@ -157,7 +179,7 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
     state
         .recorder
         .lock()
-        .start(state.temp_wav_path.clone())?;
+        .start(state.temp_wav_path.clone(), &settings.microphone)?;
     *is_recording = true;
     Ok(())
 }
@@ -190,9 +212,13 @@ async fn stop_recording_and_transcribe(
     }
 
     let wav_path = state.temp_wav_path.clone();
-    let text = tokio::task::spawn_blocking(move || speech::transcribe(&wav_path, &model_path))
-        .await
-        .map_err(|e| e.to_string())??;
+    let language = settings.language.clone();
+    let silence_threshold = settings.silence_threshold;
+    let text = tokio::task::spawn_blocking(move || {
+        speech::transcribe(&wav_path, &model_path, &language, silence_threshold)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     if text.is_empty() {
         return Ok(String::new());
@@ -560,6 +586,42 @@ fn default_microphone() -> Option<String> {
     output::default_input_device_name()
 }
 
+/// Probe whether an accelerator string can be registered — used by the
+/// shortcut-capture UI to flag a conflict before the user saves it.
+#[tauri::command]
+fn is_shortcut_available(app: AppHandle, state: State<'_, AppState>, accel: String) -> bool {
+    if state.settings.lock().hotkey == accel {
+        return true;
+    }
+    let gs = app.global_shortcut();
+    match gs.register(accel.as_str()) {
+        Ok(_) => {
+            let _ = gs.unregister(accel.as_str());
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[tauri::command]
+fn export_settings_to(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let settings = state.settings.lock().clone();
+    let raw = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(path, raw).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn import_settings_from(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<AppSettings, String> {
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let settings: AppSettings = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    save_settings(app, state, settings.clone())?;
+    Ok(settings)
+}
+
 #[tauri::command]
 fn catalog_stats() -> serde_json::Value {
     serde_json::json!({
@@ -607,7 +669,12 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_notification::init());
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ));
 
     #[cfg(target_os = "macos")]
     {
@@ -714,6 +781,9 @@ pub fn run() {
             list_microphones,
             default_microphone,
             catalog_stats,
+            is_shortcut_available,
+            export_settings_to,
+            import_settings_from,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OpenVoice");

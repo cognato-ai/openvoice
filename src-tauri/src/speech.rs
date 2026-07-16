@@ -107,7 +107,12 @@ fn init_ort() -> Result<(), String> {
 }
 
 /// Transcribes a 16 kHz mono f32 WAV using Whisper (cached) or Parakeet.
-pub fn transcribe(wav_path: &Path, model_path: &Path) -> Result<String, String> {
+pub fn transcribe(
+    wav_path: &Path,
+    model_path: &Path,
+    language: &str,
+    silence_threshold: f32,
+) -> Result<String, String> {
     let samples = read_wav_samples(wav_path)?;
     if samples.is_empty() {
         return Ok(String::new());
@@ -115,7 +120,7 @@ pub fn transcribe(wav_path: &Path, model_path: &Path) -> Result<String, String> 
 
     // Skip near-silence so we don't waste inference and spam empty results.
     let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
-    if rms < 0.005 {
+    if rms < silence_threshold {
         log::info!("[speech] Audio too quiet (rms={rms:.5}), skipping");
         return Ok(String::new());
     }
@@ -123,11 +128,11 @@ pub fn transcribe(wav_path: &Path, model_path: &Path) -> Result<String, String> 
     if model_path.is_dir() {
         transcribe_parakeet(&samples, model_path)
     } else {
-        transcribe_whisper(&samples, model_path)
+        transcribe_whisper(&samples, model_path, language)
     }
 }
 
-fn transcribe_whisper(samples: &[f32], model_path: &Path) -> Result<String, String> {
+fn transcribe_whisper(samples: &[f32], model_path: &Path, language: &str) -> Result<String, String> {
     use whisper_rs::{FullParams, SamplingStrategy};
 
     ensure_whisper_loaded(model_path)?;
@@ -143,7 +148,9 @@ fn transcribe_whisper(samples: &[f32], model_path: &Path) -> Result<String, Stri
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
-    params.set_language(Some("en"));
+    // "auto" lets Whisper detect the spoken language; otherwise force decoding
+    // in the requested language (English-only model files ignore this anyway).
+    params.set_language(if language == "auto" { None } else { Some(language) });
     // Suppress common Whisper hallucination on short clips
     params.set_suppress_blank(true);
     params.set_no_speech_thold(0.6);

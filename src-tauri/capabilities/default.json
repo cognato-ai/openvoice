@@ -10,6 +10,8 @@
     "core:default",
     "global-shortcut:default",
     "notification:default",
-    "macos-permissions:default"
+    "macos-permissions:default",
+    "dialog:default",
+    "autostart:default"
   ]
 }
