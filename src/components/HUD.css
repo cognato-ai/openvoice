@@ -1,0 +1,146 @@
+.hud {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  width: 100%;
+  height: 100%;
+  border-radius: 40px;
+  background: color-mix(in srgb, var(--bg-card) 92%, transparent);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  user-select: none;
+  overflow: hidden;
+  color: var(--text);
+}
+
+.hud--recording { border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.hud--transcribing { border-color: var(--accent-ring); }
+.hud--done { border-color: color-mix(in srgb, var(--success) 45%, transparent); }
+.hud--error { border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+
+.hud__mic-wrap {
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hud__pulse {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--danger);
+  animation: pulse-ring 1.35s ease-out infinite;
+}
+
+.hud__mic-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  position: relative;
+  z-index: 1;
+}
+
+.hud--recording .hud__mic-icon { color: var(--danger); background: var(--danger-soft); }
+.hud--transcribing .hud__mic-icon { color: var(--accent-text); background: var(--accent-soft); }
+.hud--done .hud__mic-icon { color: var(--success); background: var(--success-soft); }
+.hud--error .hud__mic-icon { color: var(--danger); background: var(--danger-soft); }
+
+.hud__center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.hud__waveform {
+  display: flex;
+  align-items: center;
+  gap: 2.5px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.hud__bar {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--danger);
+  height: 100%;
+  transform-origin: center;
+  transform: scaleY(calc(0.15 + var(--level, 0) * 0.85));
+  animation: wave-bar 0.7s ease-in-out var(--delay, 0s) infinite;
+}
+
+.hud__timer {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.hud__label { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.hud__label--accent { color: var(--accent-text); }
+
+.hud__result {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.hud__result--error { color: var(--danger); }
+
+.hud__hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.hud__hint kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-secondary);
+}
+
+.hud__right {
+  flex-shrink: 0;
+  width: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hud__rec-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: rec-blink 1s ease-in-out infinite;
+}
+
+.hud__done-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.spin { animation: spin 0.7s linear infinite; }

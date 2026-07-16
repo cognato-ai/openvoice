@@ -1,0 +1,30 @@
+{
+  "name": "openvoice",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "PATH=\"/opt/homebrew/bin:/usr/local/opt/rustup/bin:/usr/local/bin:$PATH\" ORT_DYLIB_PATH=\"$([ -f /opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib ] && echo /opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib || echo /usr/local/opt/onnxruntime/lib/libonnxruntime.dylib)\" tauri",
+    "sign-dev": "codesign --force --sign - --identifier com.openvoice.app src-tauri/target/debug/openvoice 2>/dev/null || true",
+    "clean": "rm -rf src-tauri/target dist && echo 'Cleaned target/ and dist/'"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-global-shortcut": "^2",
+    "@tauri-apps/plugin-notification": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tauri-plugin-macos-permissions-api": "^2.3.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^6.0.0"
+  }
+}

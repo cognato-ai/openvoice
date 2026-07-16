@@ -1,0 +1,66 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenVoice",
+  "version": "0.1.0",
+  "identifier": "com.openvoice.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "hud",
+        "title": "OpenVoice HUD",
+        "width": 360,
+        "height": 72,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "shadow": false,
+        "acceptFirstMouse": true,
+        "focus": false
+      },
+      {
+        "label": "settings",
+        "title": "OpenVoice",
+        "width": 720,
+        "height": 560,
+        "minWidth": 640,
+        "minHeight": 480,
+        "decorations": true,
+        "visible": false,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "entitlements": "./Entitlements.plist",
+      "infoPlist": "./Info.plist"
+    },
+    "resources": [
+      "resources/**/*"
+    ]
+  },
+  "plugins": {}
+}
