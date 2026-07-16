@@ -161,18 +161,6 @@ fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
             settings.model
         ));
     }
-    // Catalog-only GGUF files can't be transcribed yet
-    let path = model_manager::model_path(&settings.model);
-    let is_whisper_or_parakeet = settings.model.ends_with(".bin")
-        || settings.model == "parakeet-tdt-0.6b-v3"
-        || path.extension().map(|e| e == "bin").unwrap_or(false);
-    if !is_whisper_or_parakeet && !path.is_dir() {
-        return Err(
-            "This catalog model needs the full GGUF engine (coming next). Pick a Runnable Whisper model for now."
-                .into(),
-        );
-    }
-
     // Do not hard-block recording when AX reports false — macOS often lags until
     // a full relaunch, and we fall back to clipboard after transcription.
 
@@ -202,7 +190,7 @@ async fn stop_recording_and_transcribe(
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
     let settings = state.settings.lock().clone();
-    let model_path = model_manager::model_path(&settings.model);
+    let model_path = model_manager::resolved_model_path(&settings.model);
 
     if !model_manager::is_model_downloaded(&settings.model) {
         return Err(format!(
@@ -291,7 +279,7 @@ fn save_settings(
         speech::unload_model();
         // Warm the new model in the background if it's already downloaded
         if model_manager::is_model_downloaded(&settings.model) {
-            let path = model_manager::model_path(&settings.model);
+            let path = model_manager::resolved_model_path(&settings.model);
             std::thread::spawn(move || {
                 if let Err(e) = speech::preload_model(&path) {
                     log::warn!("[speech] preload failed: {e}");
@@ -649,6 +637,7 @@ fn quit_app(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::init();
+    speech::init_transcribe_cpp();
     model_manager::ensure_app_data_dir().ok();
     model_manager::ensure_models_dir().ok();
 
@@ -699,7 +688,7 @@ pub fn run() {
 
             // Warm active model if present
             if model_manager::is_model_downloaded(&preload_model) {
-                let path = model_manager::model_path(&preload_model);
+                let path = model_manager::resolved_model_path(&preload_model);
                 std::thread::spawn(move || {
                     if let Err(e) = speech::preload_model(&path) {
                         log::warn!("[speech] startup preload failed: {e}");

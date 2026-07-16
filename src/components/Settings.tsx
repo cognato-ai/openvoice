@@ -639,9 +639,8 @@ export default function Settings() {
             <header className="s-main__header">
               <h1 className="s-main__title">Models</h1>
               <p className="s-main__desc">
-                {catalogTotal} models listed (Handy catalog + Whisper).{" "}
-                <strong>Ready to use</strong> = works today. Others download as GGUF for when the
-                full engine lands.
+                {catalogTotal} models, all runnable — Whisper, Parakeet, Canary, Moonshine,
+                SenseVoice, GigaAM, and more.
               </p>
             </header>
             <div className="s-main__body">

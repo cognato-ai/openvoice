@@ -27,19 +27,83 @@ fn whisper_cache() -> &'static Mutex<WhisperCache> {
     })
 }
 
+/// GGUF/GGML model cache (transcribe-cpp) — same warm-cache shape as
+/// `WhisperCache` above, but backs every architecture in the model catalog
+/// (Whisper, Parakeet, Canary, Moonshine, SenseVoice, GigaAM, Cohere, Voxtral,
+/// Qwen3-ASR, Granite-Speech, FunASR, MedASR) through one engine that
+/// auto-detects architecture from the GGUF file header.
+struct GgufCache {
+    path: Option<PathBuf>,
+    session: Option<transcribe_cpp::Session>,
+}
+
+static GGUF_CACHE: OnceLock<Mutex<GgufCache>> = OnceLock::new();
+
+fn gguf_cache() -> &'static Mutex<GgufCache> {
+    GGUF_CACHE.get_or_init(|| {
+        Mutex::new(GgufCache {
+            path: None,
+            session: None,
+        })
+    })
+}
+
+/// One-time transcribe-cpp init (logging + compute backend selection). Call
+/// once at app startup, before any GGUF model is loaded.
+pub fn init_transcribe_cpp() {
+    transcribe_cpp::init_logging();
+    if let Err(e) = transcribe_cpp::init_backends_default() {
+        log::warn!("[speech] transcribe-cpp backend init failed: {e}");
+    }
+}
+
+fn ensure_gguf_loaded(model_path: &Path) -> Result<(), String> {
+    let mut cache = gguf_cache().lock();
+    if cache.path.as_ref().map(|p| p.as_path()) == Some(model_path) && cache.session.is_some() {
+        return Ok(());
+    }
+
+    log::info!("[speech] Loading GGUF model from {}", model_path.display());
+    let model = transcribe_cpp::Model::load(model_path)
+        .map_err(|e| format!("Failed to load GGUF model: {e}"))?;
+    let session = model
+        .session()
+        .map_err(|e| format!("Failed to create transcribe-cpp session: {e}"))?;
+
+    cache.path = Some(model_path.to_path_buf());
+    cache.session = Some(session);
+    log::info!("[speech] GGUF model ready");
+    Ok(())
+}
+
+fn is_gguf(model_path: &Path) -> bool {
+    model_path
+        .extension()
+        .map(|e| e == "gguf")
+        .unwrap_or(false)
+}
+
 /// Drop any cached model (call when the active model is deleted or switched).
 pub fn unload_model() {
     let mut cache = whisper_cache().lock();
     cache.path = None;
     cache.ctx = None;
-    log::info!("[speech] Unloaded cached Whisper model");
+
+    let mut gguf = gguf_cache().lock();
+    gguf.path = None;
+    gguf.session = None;
+
+    log::info!("[speech] Unloaded cached model");
 }
 
-/// Preload a Whisper model into memory so the first real transcription is fast.
+/// Preload a model into memory so the first real transcription is fast.
 pub fn preload_model(model_path: &Path) -> Result<(), String> {
     if model_path.is_dir() {
         // Parakeet is loaded per-call for now (ONNX session management is messier).
         return Ok(());
+    }
+    if is_gguf(model_path) {
+        return ensure_gguf_loaded(model_path);
     }
     ensure_whisper_loaded(model_path)?;
     Ok(())
@@ -127,9 +191,39 @@ pub fn transcribe(
 
     if model_path.is_dir() {
         transcribe_parakeet(&samples, model_path)
+    } else if is_gguf(model_path) {
+        transcribe_gguf(&samples, model_path, language)
     } else {
         transcribe_whisper(&samples, model_path, language)
     }
+}
+
+fn transcribe_gguf(samples: &[f32], model_path: &Path, language: &str) -> Result<String, String> {
+    use transcribe_cpp::{RunOptions, Task};
+
+    ensure_gguf_loaded(model_path)?;
+
+    let mut cache = gguf_cache().lock();
+    let session = cache
+        .session
+        .as_mut()
+        .ok_or_else(|| "GGUF model not loaded".to_string())?;
+
+    let run_options = RunOptions {
+        task: Task::Transcribe,
+        language: if language == "auto" {
+            None
+        } else {
+            Some(language.to_string())
+        },
+        ..Default::default()
+    };
+
+    let result = session
+        .run(samples, &run_options)
+        .map_err(|e| format!("transcribe-cpp inference error: {e}"))?;
+
+    Ok(result.text.trim().to_string())
 }
 
 fn transcribe_whisper(samples: &[f32], model_path: &Path, language: &str) -> Result<String, String> {

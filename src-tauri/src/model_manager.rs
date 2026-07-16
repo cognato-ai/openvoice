@@ -247,6 +247,28 @@ pub fn is_model_downloaded(name: &str) -> bool {
     model_path(name).exists()
 }
 
+/// Resolves a model name to its actual file path on disk for transcription /
+/// preloading. Whisper `.bin` files and the Parakeet ONNX directory live
+/// directly under `models_dir()`; catalog GGUF downloads live nested under
+/// `models_dir()/catalog/<slug>/<quant-file>.gguf`.
+pub fn resolved_model_path(name: &str) -> PathBuf {
+    if name == "parakeet-tdt-0.6b-v3" || name.ends_with(".bin") {
+        return model_path(name);
+    }
+    let dir = models_dir().join("catalog").join(name);
+    if dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().map(|e| e == "gguf").unwrap_or(false) {
+                    return p;
+                }
+            }
+        }
+    }
+    model_path(name)
+}
+
 pub fn model_files(name: &str) -> Vec<ModelFile> {
     match name {
         "ggml-tiny.en.bin" => vec![ModelFile {
@@ -470,16 +492,9 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
         let (name, runnable, downloaded) = if let Some(ggml) = whisper_ggml_for_slug(&m.slug) {
             (ggml.to_string(), true, is_model_downloaded(ggml))
         } else {
-            let local = file
-                .map(|f| {
-                    models_dir()
-                        .join("catalog")
-                        .join(&m.slug)
-                        .join(&f.filename)
-                        .exists()
-                })
-                .unwrap_or(false);
-            (m.slug.clone(), false, local)
+            // Every catalog entry is a GGUF file transcribe-cpp can run —
+            // architecture is auto-detected from the file header.
+            (m.slug.clone(), true, is_model_downloaded(&m.slug))
         };
 
         let speed = m
@@ -497,14 +512,7 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
                 }
             });
 
-        let desc = if runnable {
-            m.description.clone()
-        } else {
-            format!(
-                "{} · GGUF catalog model (download OK; run needs full engine later)",
-                m.description
-            )
-        };
+        let desc = m.description.clone();
 
         out.push(AppModel {
             name,
