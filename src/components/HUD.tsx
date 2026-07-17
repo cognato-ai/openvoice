@@ -34,7 +34,8 @@ async function positionHUD(height = HUD_H) {
 
 export default function HUD() {
   const [state, setState] = useState<RecordingState>("idle");
-  const [level, setLevel] = useState(0);
+  const WAVE_BARS = 7;
+  const [levels, setLevels] = useState<number[]>(Array(WAVE_BARS).fill(0));
   const [lastText, setLastText] = useState("");
   const [elapsedSecs, setElapsedSecs] = useState(0);
   const [previewText, setPreviewText] = useState("");
@@ -160,11 +161,12 @@ export default function HUD() {
   }, [startRecording, stopRecording]);
 
   useEffect(() => {
-    if (state === "recording" && previewText) {
-      positionHUD(HUD_H_PREVIEW);
-    } else if (state !== "recording") {
-      // reset for next time; showHUD() also re-positions at HUD_H on start
-      positionHUD(HUD_H);
+    // Only ever touch window geometry while actively recording and visible.
+    // Calling setSize/setPosition once hidden risks re-ordering a hidden
+    // window back onto screen on macOS — the reset back to HUD_H happens in
+    // showHUD() at the start of the *next* recording instead.
+    if (state === "recording") {
+      positionHUD(previewText ? HUD_H_PREVIEW : HUD_H);
     }
   }, [state, previewText]);
 
@@ -172,8 +174,13 @@ export default function HUD() {
     if (state === "recording") {
       levelTimer.current = setInterval(async () => {
         const lvl = await invoke<number>("get_audio_level");
-        setLevel(Math.min(lvl * 12, 1));
-      }, 50);
+        const sample = Math.min(lvl * 12, 1);
+        // Roll the newest sample in and shift the rest along, so each bar
+        // reflects a genuinely different recent moment (real amplitude
+        // variation across the waveform) instead of one shared value
+        // differentiated only by a fake CSS animation-delay offset.
+        setLevels((prev) => [...prev.slice(1), sample]);
+      }, 90);
       recordingTimer.current = setInterval(() => {
         setElapsedSecs((s) => s + 1);
       }, 1000);
@@ -191,7 +198,7 @@ export default function HUD() {
       if (levelTimer.current) clearInterval(levelTimer.current);
       if (recordingTimer.current) clearInterval(recordingTimer.current);
       if (previewTimer.current) clearInterval(previewTimer.current);
-      setLevel(0);
+      setLevels(Array(WAVE_BARS).fill(0));
     }
     return () => {
       if (levelTimer.current) clearInterval(levelTimer.current);
@@ -224,16 +231,11 @@ export default function HUD() {
           <>
             <div className="hud__row">
               <div className="hud__waveform">
-                {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+                {levels.map((lvl, i) => (
                   <div
                     key={i}
                     className="hud__bar"
-                    style={
-                      {
-                        "--delay": `${i * 0.08}s`,
-                        "--level": level,
-                      } as React.CSSProperties
-                    }
+                    style={{ "--level": lvl } as React.CSSProperties}
                   />
                 ))}
               </div>

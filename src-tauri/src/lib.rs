@@ -672,6 +672,26 @@ fn show_settings_window(app: AppHandle) {
 /// The frontend still owns hiding it (state transitions need a delay to show
 /// "done"/"error" before disappearing) — this only guarantees the overlay
 /// reliably *appears* the instant the shortcut fires.
+const HUD_W: f64 = 360.0;
+const HUD_H: f64 = 72.0;
+
+/// The monitor the HUD should appear on: whichever one currently has the
+/// mouse cursor, so the overlay follows the screen the user is actually
+/// looking at instead of always pinning to the primary display.
+fn active_monitor(win: &tauri::WebviewWindow) -> Option<tauri::Monitor> {
+    use enigo::{Enigo, Mouse, Settings};
+    let cursor = Enigo::new(&Settings::default()).ok()?.location().ok()?;
+    let (cx, cy) = cursor;
+    win.available_monitors().ok()?.into_iter().find(|m| {
+        let pos = m.position();
+        let size = m.size();
+        (cx as i64) >= pos.x as i64
+            && (cx as i64) < pos.x as i64 + size.width as i64
+            && (cy as i64) >= pos.y as i64
+            && (cy as i64) < pos.y as i64 + size.height as i64
+    })
+}
+
 fn show_hud_window(app: &AppHandle) {
     let show_overlay = app
         .try_state::<AppState>()
@@ -683,14 +703,24 @@ fn show_hud_window(app: &AppHandle) {
     let Some(win) = app.get_webview_window("hud") else {
         return;
     };
-    if let Ok(Some(monitor)) = win.primary_monitor() {
+    // Reset to default size in case a previous session left it grown for a
+    // live-preview line — the frontend also does this, but resetting here
+    // too avoids a one-frame flash at the wrong size before it catches up.
+    let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
+        width: HUD_W,
+        height: HUD_H,
+    }));
+    let monitor = active_monitor(&win).or_else(|| win.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
         let scale = monitor.scale_factor();
-        let size = monitor.size();
-        let screen_w = size.width as f64 / scale;
-        let screen_h = size.height as f64 / scale;
-        let hud_w = 360.0;
-        let x = ((screen_w - hud_w) / 2.0).round();
-        let y = (screen_h - 130.0).round();
+        let mon_pos = monitor.position();
+        let mon_size = monitor.size();
+        let screen_x = mon_pos.x as f64 / scale;
+        let screen_y = mon_pos.y as f64 / scale;
+        let screen_w = mon_size.width as f64 / scale;
+        let screen_h = mon_size.height as f64 / scale;
+        let x = (screen_x + (screen_w - HUD_W) / 2.0).round();
+        let y = (screen_y + screen_h - 130.0).round();
         let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
     }
     let _ = win.show();

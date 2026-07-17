@@ -102,7 +102,7 @@
   height: 100%;
   transform-origin: center;
   transform: scaleY(calc(0.15 + var(--level, 0) * 0.85));
-  animation: wave-bar 0.7s ease-in-out var(--delay, 0s) infinite;
+  transition: transform 90ms ease-out;
 }
 
 .hud__timer {
