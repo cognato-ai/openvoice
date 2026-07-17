@@ -1,15 +1,9 @@
-# Force native arm64 builds on Apple Silicon.
-#
-# rustup here was installed via the Intel Homebrew prefix (/usr/local) and so
-# runs under Rosetta, reporting `host: x86_64-apple-darwin`. Without this, every
-# dev build produces an x86_64 binary.
-#
-# That matters for more than speed: on Apple Silicon the kernel requires arm64
-# binaries to carry a signature, so the linker ad-hoc signs them automatically.
-# x86_64 binaries have no such requirement and link completely unsigned — and
-# macOS TCC will not hold an Accessibility grant for an unsigned binary. The
-# toggle can be switched on in System Settings but never takes effect.
-#
-# Verify with: codesign -dvvv <binary> | grep Signature   -> "Signature=adhoc"
-[build]
-target = "aarch64-apple-darwin"
+# transcribe-cpp-sys's vendored ggml probes the host CPU via `-mcpu=native`,
+# but its build also passes clang an explicit `--target=arm64-apple-macosx`
+# (to pin the deployment target). Apple clang rejects that combination:
+#   clang: error: unsupported argument 'native' to option '-mcpu='
+# GGML_NATIVE=OFF falls back to a portable baseline instead of native-CPU
+# probing. transcribe-cpp-sys's build.rs reads this via its documented
+# CMAKE_ARGS escape hatch (bindings/rust/sys/build.rs).
+[env]
+CMAKE_ARGS = "-DGGML_NATIVE=OFF"
