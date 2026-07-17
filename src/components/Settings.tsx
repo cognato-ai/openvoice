@@ -27,6 +27,7 @@ interface ModelInfo {
   runnable: boolean;
   languages: string[];
   family: string;
+  rank: number;
 }
 
 interface AppSettings {
@@ -573,16 +574,12 @@ export default function Settings() {
   }
 
   const needsOnboarding = !settings.onboarding_complete;
-  const canFinish = perms.model_ready && perms.microphone;
+  const canFinish = perms.microphone;
 
   if (needsOnboarding) {
     return (
       <Onboarding
         perms={perms}
-        models={models.filter((m) => m.runnable)}
-        downloads={downloads}
-        onDownload={startDownload}
-        onCancel={cancelDownload}
         onRefresh={refresh}
         onFinish={finishOnboarding}
         onGrantAx={grantAccessibility}
@@ -639,8 +636,8 @@ export default function Settings() {
             <header className="s-main__header">
               <h1 className="s-main__title">Models</h1>
               <p className="s-main__desc">
-                {catalogTotal} models, all runnable — Whisper, Parakeet, Canary, Moonshine,
-                SenseVoice, GigaAM, and more.
+                {catalogTotal} models, all runnable — ranked by speed + accuracy. Whisper,
+                Parakeet, Canary, Moonshine, SenseVoice, GigaAM, and more.
               </p>
             </header>
             <div className="s-main__body">
@@ -1357,7 +1354,10 @@ function ModelCard({
       onClick={() => canClick && onSelect()}
     >
       <div className="s-card__top">
-        <div className="s-card__title">{model.displayName}</div>
+        <div className="s-card__title">
+          {model.rank <= 10 && <span className="s-badge" style={{ marginRight: 6 }}>#{model.rank}</span>}
+          {model.displayName}
+        </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
           {model.recommended && <span className="s-badge s-badge--accent">Recommended</span>}
           {active && model.runnable && <span className="s-badge s-badge--on">Active</span>}
@@ -1424,10 +1424,6 @@ function ModelCard({
 
 function Onboarding({
   perms,
-  models,
-  downloads,
-  onDownload,
-  onCancel,
   onRefresh,
   onFinish,
   onGrantAx,
@@ -1436,10 +1432,6 @@ function Onboarding({
   canFinish,
 }: {
   perms: PermissionsStatus;
-  models: ModelInfo[];
-  downloads: Record<string, DownloadState>;
-  onDownload: (name: string) => void;
-  onCancel: () => void;
   onRefresh: () => void;
   onFinish: () => void;
   onGrantAx: () => void;
@@ -1447,8 +1439,6 @@ function Onboarding({
   axBusy: boolean;
   canFinish: boolean;
 }) {
-  const picks = models.filter((m) => m.recommended).slice(0, 2);
-
   return (
     <div className="ob">
       <div className="ob__inner">
@@ -1457,7 +1447,7 @@ function Onboarding({
         </div>
         <h1 className="ob__title">Speak. It types.</h1>
         <p className="ob__sub">
-          Private voice typing on your Mac. Grant access, download a small model, go.
+          Private voice typing on your Mac. Grant access, then pick a model in Settings.
         </p>
         {perms.is_dev && (
           <p className="ob__hint" style={{ marginBottom: 16 }}>
@@ -1503,15 +1493,6 @@ function Onboarding({
             )}
           </div>
 
-          <div className={`ob__step ${perms.model_ready ? "ob__step--done" : ""}`}>
-            <div className="ob__step-icon">{perms.model_ready ? "✓" : "3"}</div>
-            <div className="ob__step-body">
-              <div className="ob__step-title">Speech model</div>
-              <div className="ob__step-desc">
-                {perms.model_ready ? "Model ready" : "Download Tiny (75 MB) to start"}
-              </div>
-            </div>
-          </div>
         </div>
 
         {!perms.accessibility && (
@@ -1522,53 +1503,6 @@ function Onboarding({
           </p>
         )}
 
-        {!perms.model_ready && (
-          <div className="ob__actions">
-            {picks.map((m) => {
-              const dl = downloads[m.name];
-              if (m.downloaded) {
-                return (
-                  <div key={m.name} className="s-card" style={{ textAlign: "left" }}>
-                    <span className="s-ready">{m.displayName}</span>
-                  </div>
-                );
-              }
-              if (dl?.active) {
-                return (
-                  <div key={m.name} className="s-card" style={{ textAlign: "left" }}>
-                    <div className="s-card__title" style={{ marginBottom: 8 }}>
-                      {m.displayName}
-                    </div>
-                    <div className="s-progress">
-                      <div className="s-progress__bar">
-                        <div className="s-progress__fill" style={{ width: `${dl.pct}%` }} />
-                      </div>
-                      <div className="s-progress__meta">
-                        <span>
-                          {formatBytes(dl.bytesReceived)} /{" "}
-                          {dl.totalBytes > 0 ? formatBytes(dl.totalBytes) : "?"}
-                        </span>
-                        <button className="s-btn s-btn--ghost s-btn--sm" onClick={onCancel}>
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-              return (
-                <button
-                  key={m.name}
-                  className="s-btn s-btn--primary"
-                  onClick={() => onDownload(m.name)}
-                >
-                  Download {m.displayName} ({m.size})
-                </button>
-              );
-            })}
-          </div>
-        )}
-
         <div className="ob__actions" style={{ marginTop: 16 }}>
           <button
             className="s-btn s-btn--primary"
@@ -1576,7 +1510,7 @@ function Onboarding({
             onClick={onFinish}
             style={{ padding: "11px 18px", fontSize: 14 }}
           >
-            {canFinish ? "Continue" : "Download a model to continue"}
+            {canFinish ? "Continue" : "Allow microphone access to continue"}
           </button>
           <button className="s-linkish" style={{ alignSelf: "center" }} onClick={onRefresh}>
             Refresh status

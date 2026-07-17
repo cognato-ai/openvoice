@@ -54,6 +54,9 @@ pub struct AppModel {
     pub downloaded: bool,
     pub languages: Vec<String>,
     pub family: String,
+    /// 1-indexed position after ranking by speed + accuracy (recommended
+    /// models first). Lower is better — shown as a "#N" badge in the UI.
+    pub rank: u32,
 }
 
 pub struct ModelFile {
@@ -74,141 +77,30 @@ struct WhisperSpec {
     languages: &'static [&'static str],
 }
 
-/// All Whisper GGML models we can run today via whisper-rs.
-const WHISPER_MODELS: &[WhisperSpec] = &[
-    WhisperSpec {
-        name: "ggml-tiny.en.bin",
-        display: "Whisper Tiny (English)",
-        size_label: "75 MB",
-        size_bytes: 75_000_000,
-        quality: "Good enough",
-        speed: "Instant",
-        description: "Fastest English model — best first download",
-        recommended: true,
-        advanced: false,
-        languages: &["en"],
-    },
-    WhisperSpec {
-        name: "ggml-tiny.bin",
-        display: "Whisper Tiny",
-        size_label: "75 MB",
-        size_bytes: 75_000_000,
-        quality: "Good enough",
-        speed: "Instant",
-        description: "Multilingual tiny model",
-        recommended: false,
-        advanced: false,
-        languages: &["multi"],
-    },
-    WhisperSpec {
-        name: "ggml-base.en.bin",
-        display: "Whisper Base (English)",
-        size_label: "142 MB",
-        size_bytes: 142_000_000,
-        quality: "Great",
-        speed: "Fast",
-        description: "Sweet spot for everyday English typing",
-        recommended: true,
-        advanced: false,
-        languages: &["en"],
-    },
-    WhisperSpec {
-        name: "ggml-base.bin",
-        display: "Whisper Base",
-        size_label: "142 MB",
-        size_bytes: 142_000_000,
-        quality: "Great",
-        speed: "Fast",
-        description: "Multilingual base model",
-        recommended: false,
-        advanced: false,
-        languages: &["multi"],
-    },
-    WhisperSpec {
-        name: "ggml-small.en.bin",
-        display: "Whisper Small (English)",
-        size_label: "466 MB",
-        size_bytes: 466_000_000,
-        quality: "Excellent",
-        speed: "Solid",
-        description: "Higher accuracy English",
-        recommended: false,
-        advanced: false,
-        languages: &["en"],
-    },
-    WhisperSpec {
-        name: "ggml-small.bin",
-        display: "Whisper Small",
-        size_label: "466 MB",
-        size_bytes: 466_000_000,
-        quality: "Excellent",
-        speed: "Solid",
-        description: "Multilingual small model",
-        recommended: false,
-        advanced: false,
-        languages: &["multi"],
-    },
-    WhisperSpec {
-        name: "ggml-medium.en.bin",
-        display: "Whisper Medium (English)",
-        size_label: "1.5 GB",
-        size_bytes: 1_500_000_000,
-        quality: "Near perfect",
-        speed: "Slower",
-        description: "Heavy English model",
-        recommended: false,
-        advanced: true,
-        languages: &["en"],
-    },
-    WhisperSpec {
-        name: "ggml-medium.bin",
-        display: "Whisper Medium",
-        size_label: "1.5 GB",
-        size_bytes: 1_500_000_000,
-        quality: "Near perfect",
-        speed: "Slower",
-        description: "Broad multilingual accuracy",
-        recommended: false,
-        advanced: true,
-        languages: &["multi"],
-    },
-    WhisperSpec {
-        name: "ggml-large-v3-turbo.bin",
-        display: "Whisper Large v3 Turbo",
-        size_label: "1.6 GB",
-        size_bytes: 1_600_000_000,
-        quality: "Excellent",
-        speed: "Fast for size",
-        description: "Large quality with turbo speed",
-        recommended: false,
-        advanced: true,
-        languages: &["multi"],
-    },
-    WhisperSpec {
-        name: "ggml-large-v3.bin",
-        display: "Whisper Large v3",
-        size_label: "3.1 GB",
-        size_bytes: 3_100_000_000,
-        quality: "Best Whisper",
-        speed: "Slow",
-        description: "Highest Whisper accuracy",
-        recommended: false,
-        advanced: true,
-        languages: &["multi"],
-    },
-    WhisperSpec {
-        name: "parakeet-tdt-0.6b-v3",
-        display: "Parakeet TDT 0.6B v3 (ONNX)",
-        size_label: "2.6 GB",
-        size_bytes: 2_600_000_000,
-        quality: "Best",
-        speed: "Very fast",
-        description: "NVIDIA Parakeet ONNX — needs: brew install onnxruntime",
-        recommended: false,
-        advanced: true,
-        languages: &["multi"],
-    },
-];
+/// Whisper models run as GGUF through transcribe-cpp via the catalog below
+/// (see `list_models_for_ui`) — matching Handy, which has no whisper-rs
+/// dependency at all. This one hand-coded entry is the exception: Parakeet
+/// TDT runs through parakeet-rs/ONNX Runtime, a completely separate engine
+/// from transcribe-cpp, so it isn't part of the GGUF catalog.
+const EXTRA_MODELS: &[WhisperSpec] = &[WhisperSpec {
+    name: "parakeet-tdt-0.6b-v3",
+    display: "Parakeet TDT 0.6B v3 (ONNX)",
+    size_label: "2.6 GB",
+    size_bytes: 2_600_000_000,
+    quality: "Best",
+    speed: "Very fast",
+    description: "NVIDIA Parakeet ONNX — needs: brew install onnxruntime",
+    recommended: true,
+    advanced: true,
+    languages: &["multi"],
+}];
+
+/// speed_score/accuracy_score aren't in the catalog for this hand-coded
+/// entry, so give it numbers consistent with its "Very fast"/"Best" labels —
+/// keeps it ranked alongside the top catalog picks instead of falling to
+/// the bottom of the (score.unwrap_or(0)) sort below.
+const PARAKEET_SPEED_SCORE: u32 = 90;
+const PARAKEET_ACCURACY_SCORE: u32 = 90;
 
 fn format_bytes(b: u64) -> String {
     if b >= 1_000_000_000 {
@@ -234,9 +126,6 @@ pub fn is_model_downloaded(name: &str) -> bool {
         ];
         return required.iter().all(|f| dir.join(f).exists());
     }
-    if name.ends_with(".bin") {
-        return model_path(name).exists();
-    }
     // Catalog GGUF under models/catalog/<slug>/
     let dir = models_dir().join("catalog").join(name);
     if dir.is_dir() {
@@ -248,11 +137,11 @@ pub fn is_model_downloaded(name: &str) -> bool {
 }
 
 /// Resolves a model name to its actual file path on disk for transcription /
-/// preloading. Whisper `.bin` files and the Parakeet ONNX directory live
-/// directly under `models_dir()`; catalog GGUF downloads live nested under
+/// preloading. The Parakeet ONNX directory lives directly under
+/// `models_dir()`; catalog GGUF downloads live nested under
 /// `models_dir()/catalog/<slug>/<quant-file>.gguf`.
 pub fn resolved_model_path(name: &str) -> PathBuf {
-    if name == "parakeet-tdt-0.6b-v3" || name.ends_with(".bin") {
+    if name == "parakeet-tdt-0.6b-v3" {
         return model_path(name);
     }
     let dir = models_dir().join("catalog").join(name);
@@ -271,46 +160,6 @@ pub fn resolved_model_path(name: &str) -> PathBuf {
 
 pub fn model_files(name: &str) -> Vec<ModelFile> {
     match name {
-        "ggml-tiny.en.bin" => vec![ModelFile {
-            filename: "ggml-tiny.en.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
-        }],
-        "ggml-tiny.bin" => vec![ModelFile {
-            filename: "ggml-tiny.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-        }],
-        "ggml-base.en.bin" => vec![ModelFile {
-            filename: "ggml-base.en.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-        }],
-        "ggml-base.bin" => vec![ModelFile {
-            filename: "ggml-base.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-        }],
-        "ggml-small.en.bin" => vec![ModelFile {
-            filename: "ggml-small.en.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
-        }],
-        "ggml-small.bin" => vec![ModelFile {
-            filename: "ggml-small.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-        }],
-        "ggml-medium.en.bin" => vec![ModelFile {
-            filename: "ggml-medium.en.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
-        }],
-        "ggml-medium.bin" => vec![ModelFile {
-            filename: "ggml-medium.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-        }],
-        "ggml-large-v3-turbo.bin" => vec![ModelFile {
-            filename: "ggml-large-v3-turbo.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
-        }],
-        "ggml-large-v3.bin" => vec![ModelFile {
-            filename: "ggml-large-v3.bin",
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
-        }],
         "parakeet-tdt-0.6b-v3" => vec![
             ModelFile {
                 filename: "encoder-model.onnx",
@@ -405,78 +254,42 @@ fn load_catalog() -> &'static [CatalogModel] {
         .as_slice()
 }
 
-fn whisper_ggml_for_slug(slug: &str) -> Option<&'static str> {
-    match slug {
-        "whisper-tiny.en" => Some("ggml-tiny.en.bin"),
-        "whisper-tiny" => Some("ggml-tiny.bin"),
-        "whisper-base.en" => Some("ggml-base.en.bin"),
-        "whisper-base" => Some("ggml-base.bin"),
-        "whisper-small.en" => Some("ggml-small.en.bin"),
-        "whisper-small" => Some("ggml-small.bin"),
-        "whisper-medium.en" => Some("ggml-medium.en.bin"),
-        "whisper-medium" => Some("ggml-medium.bin"),
-        "whisper-large-v3-turbo" => Some("ggml-large-v3-turbo.bin"),
-        "whisper-large-v3" | "whisper-large" | "whisper-large-v2" => Some("ggml-large-v3.bin"),
-        _ => None,
-    }
-}
-
-/// Full model list for the UI (runnable Whisper first, then entire Handy catalog).
+/// Full model list for the UI, ranked by effectiveness: recommended models
+/// first, then by combined speed + accuracy score (both out of ~100,
+/// matching the catalog's scale) descending.
 pub fn list_models_for_ui() -> Vec<AppModel> {
-    let mut out = Vec::new();
+    let mut scored: Vec<(AppModel, bool, u32)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for w in WHISPER_MODELS {
+    for w in EXTRA_MODELS {
         let name = w.name.to_string();
         seen.insert(name.clone());
-        let engine = if name.starts_with("parakeet") {
-            "parakeet"
-        } else {
-            "whisper"
-        };
-        out.push(AppModel {
-            name: name.clone(),
-            display_name: w.display.to_string(),
-            engine: engine.into(),
-            architecture: engine.into(),
-            size: w.size_label.into(),
-            size_bytes: w.size_bytes,
-            quality: w.quality.into(),
-            speed: w.speed.into(),
-            description: w.description.into(),
-            recommended: w.recommended,
-            advanced: w.advanced,
-            runnable: true,
-            downloaded: is_model_downloaded(&name),
-            languages: w.languages.iter().map(|s| (*s).to_string()).collect(),
-            family: engine.into(),
-        });
+        let engine = "parakeet";
+        scored.push((
+            AppModel {
+                name: name.clone(),
+                display_name: w.display.to_string(),
+                engine: engine.into(),
+                architecture: engine.into(),
+                size: w.size_label.into(),
+                size_bytes: w.size_bytes,
+                quality: w.quality.into(),
+                speed: w.speed.into(),
+                description: w.description.into(),
+                recommended: w.recommended,
+                advanced: w.advanced,
+                runnable: true,
+                downloaded: is_model_downloaded(&name),
+                languages: w.languages.iter().map(|s| (*s).to_string()).collect(),
+                family: engine.into(),
+                rank: 0,
+            },
+            w.recommended,
+            PARAKEET_SPEED_SCORE + PARAKEET_ACCURACY_SCORE,
+        ));
     }
 
-    let mut catalog: Vec<&CatalogModel> = load_catalog().iter().collect();
-    catalog.sort_by(|a, b| {
-        match (a.recommended, b.recommended) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a
-                .recommended_rank
-                .unwrap_or(999)
-                .cmp(&b.recommended_rank.unwrap_or(999))
-                .then_with(|| {
-                    b.accuracy_score
-                        .unwrap_or(0)
-                        .cmp(&a.accuracy_score.unwrap_or(0))
-                })
-                .then_with(|| a.name.cmp(&b.name)),
-        }
-    });
-
-    for m in catalog {
-        if let Some(ggml) = whisper_ggml_for_slug(&m.slug) {
-            if seen.contains(ggml) {
-                continue;
-            }
-        }
+    for m in load_catalog() {
         if seen.contains(&m.slug) {
             continue;
         }
@@ -489,13 +302,9 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
             .or_else(|| m.files.first());
         let size_bytes = file.map(|f| f.size_bytes).unwrap_or(0);
 
-        let (name, runnable, downloaded) = if let Some(ggml) = whisper_ggml_for_slug(&m.slug) {
-            (ggml.to_string(), true, is_model_downloaded(ggml))
-        } else {
-            // Every catalog entry is a GGUF file transcribe-cpp can run —
-            // architecture is auto-detected from the file header.
-            (m.slug.clone(), true, is_model_downloaded(&m.slug))
-        };
+        // Every catalog entry is a GGUF file transcribe-cpp can run —
+        // architecture is auto-detected from the file header.
+        let (name, runnable, downloaded) = (m.slug.clone(), true, is_model_downloaded(&m.slug));
 
         let speed = m
             .speed_score
@@ -512,34 +321,53 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
                 }
             });
 
-        let desc = m.description.clone();
+        let combined_score = m.speed_score.unwrap_or(0) + m.accuracy_score.unwrap_or(0);
 
-        out.push(AppModel {
-            name,
-            display_name: m.name.clone(),
-            engine: m.architecture.clone(),
-            architecture: m.architecture.clone(),
-            size: format_bytes(size_bytes),
-            size_bytes,
-            quality,
-            speed,
-            description: desc,
-            recommended: m.recommended,
-            advanced: !m.recommended,
-            runnable,
-            downloaded,
-            languages: if m.languages.is_empty() {
-                vec![format!("{} langs", m.language_count.max(1))]
-            } else if m.languages.len() > 4 {
-                vec![format!("{} languages", m.languages.len())]
-            } else {
-                m.languages.clone()
+        scored.push((
+            AppModel {
+                name,
+                display_name: m.name.clone(),
+                engine: m.architecture.clone(),
+                architecture: m.architecture.clone(),
+                size: format_bytes(size_bytes),
+                size_bytes,
+                quality,
+                speed,
+                description: m.description.clone(),
+                recommended: m.recommended,
+                advanced: !m.recommended,
+                runnable,
+                downloaded,
+                languages: if m.languages.is_empty() {
+                    vec![format!("{} langs", m.language_count.max(1))]
+                } else if m.languages.len() > 4 {
+                    vec![format!("{} languages", m.languages.len())]
+                } else {
+                    m.languages.clone()
+                },
+                family: m.family.clone(),
+                rank: 0,
             },
-            family: m.family.clone(),
-        });
+            m.recommended,
+            combined_score,
+        ));
     }
 
-    out
+    scored.sort_by(|(a_model, a_rec, a_score), (b_model, b_rec, b_score)| {
+        b_rec
+            .cmp(a_rec)
+            .then_with(|| b_score.cmp(a_score))
+            .then_with(|| a_model.name.cmp(&b_model.name))
+    });
+
+    scored
+        .into_iter()
+        .enumerate()
+        .map(|(i, (mut model, _, _))| {
+            model.rank = (i + 1) as u32;
+            model
+        })
+        .collect()
 }
 
 pub fn resolve_download(name: &str) -> Result<(PathBuf, Vec<(String, String)>), String> {
@@ -565,10 +393,6 @@ pub fn resolve_download(name: &str) -> Result<(PathBuf, Vec<(String, String)>), 
         .iter()
         .find(|m| m.slug == name || m.id == name)
         .ok_or_else(|| format!("Unknown model: {name}"))?;
-
-    if let Some(ggml) = whisper_ggml_for_slug(&m.slug) {
-        return resolve_download(ggml);
-    }
 
     let file = m
         .files

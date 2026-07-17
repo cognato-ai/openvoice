@@ -85,10 +85,10 @@ fn default_theme() -> String {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            model: "ggml-tiny.en.bin".into(),
+            model: "whisper-tiny.en".into(),
             // paste = clipboard + ⌘V (most reliable on macOS)
             output_mode: "paste".into(),
-            hotkey: "CommandOrControl+Shift+Space".into(),
+            hotkey: "Alt+Space".into(),
             recording_mode: "ptt".into(),
             onboarding_complete: false,
             append_trailing_space: true,

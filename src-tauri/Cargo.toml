@@ -39,9 +39,6 @@ cpal = "0.15"
 # WAV file writing
 hound = "3.5"
 
-# Whisper.cpp bindings for local transcription
-whisper-rs = { version = "0.13", features = ["coreml"] }
-
 # Parakeet speech recognition bindings (ONNX Runtime based)
 parakeet-rs = "0.3.6"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }

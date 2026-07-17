@@ -1,4 +1,4 @@
-// speech.rs — Local speech recognition with cached Whisper contexts.
+// speech.rs — Local speech recognition via transcribe-cpp (GGUF) + Parakeet (ONNX).
 // Model loads once and stays warm until the user switches or deletes it.
 
 use parking_lot::Mutex;
@@ -8,30 +8,20 @@ use std::sync::OnceLock;
 
 static ORT_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// In-memory Whisper model cache. Loading a 75–466 MB model from disk every
-/// transcription is the main reason OpenVoice felt broken/slow.
-struct WhisperCache {
-    path: Option<PathBuf>,
-    // WhisperContext is Send+Sync in whisper-rs 0.13
-    ctx: Option<whisper_rs::WhisperContext>,
-}
-
-static WHISPER_CACHE: OnceLock<Mutex<WhisperCache>> = OnceLock::new();
-
-fn whisper_cache() -> &'static Mutex<WhisperCache> {
-    WHISPER_CACHE.get_or_init(|| {
-        Mutex::new(WhisperCache {
-            path: None,
-            ctx: None,
-        })
-    })
-}
-
-/// GGUF/GGML model cache (transcribe-cpp) — same warm-cache shape as
-/// `WhisperCache` above, but backs every architecture in the model catalog
-/// (Whisper, Parakeet, Canary, Moonshine, SenseVoice, GigaAM, Cohere, Voxtral,
-/// Qwen3-ASR, Granite-Speech, FunASR, MedASR) through one engine that
-/// auto-detects architecture from the GGUF file header.
+/// GGUF/GGML model cache (transcribe-cpp) — the single engine behind every
+/// architecture in the model catalog (Whisper, Parakeet, Canary, Moonshine,
+/// SenseVoice, GigaAM, Cohere, Voxtral, Qwen3-ASR, Granite-Speech, FunASR,
+/// MedASR) auto-detected from the GGUF file header.
+///
+/// Whisper models used to run through the separate `whisper-rs` crate, which
+/// vendors its own copy of ggml. Statically linking that alongside
+/// transcribe-cpp-sys's vendored ggml meant two different ggml builds shared
+/// the same binary with duplicate symbol names — the linker silently keeps
+/// only one definition per symbol, so whisper-rs's compiled calls could end
+/// up executing against transcribe-cpp's ggml internals (different struct
+/// layouts/ABI), corrupting memory. Everything now goes through this one
+/// engine instead, matching Handy (which has no whisper-rs dependency at all
+/// — every catalog model, including Whisper, is GGUF via transcribe-cpp).
 struct GgufCache {
     path: Option<PathBuf>,
     session: Option<transcribe_cpp::Session>,
@@ -76,19 +66,8 @@ fn ensure_gguf_loaded(model_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn is_gguf(model_path: &Path) -> bool {
-    model_path
-        .extension()
-        .map(|e| e == "gguf")
-        .unwrap_or(false)
-}
-
 /// Drop any cached model (call when the active model is deleted or switched).
 pub fn unload_model() {
-    let mut cache = whisper_cache().lock();
-    cache.path = None;
-    cache.ctx = None;
-
     let mut gguf = gguf_cache().lock();
     gguf.path = None;
     gguf.session = None;
@@ -102,36 +81,7 @@ pub fn preload_model(model_path: &Path) -> Result<(), String> {
         // Parakeet is loaded per-call for now (ONNX session management is messier).
         return Ok(());
     }
-    if is_gguf(model_path) {
-        return ensure_gguf_loaded(model_path);
-    }
-    ensure_whisper_loaded(model_path)?;
-    Ok(())
-}
-
-fn ensure_whisper_loaded(
-    model_path: &Path,
-) -> Result<(), String> {
-    use whisper_rs::{WhisperContext, WhisperContextParameters};
-
-    let mut cache = whisper_cache().lock();
-    if cache.path.as_ref().map(|p| p.as_path()) == Some(model_path) && cache.ctx.is_some() {
-        return Ok(());
-    }
-
-    log::info!("[speech] Loading Whisper model from {}", model_path.display());
-    let ctx = WhisperContext::new_with_params(
-        model_path
-            .to_str()
-            .ok_or_else(|| "Invalid model path".to_string())?,
-        WhisperContextParameters::default(),
-    )
-    .map_err(|e| format!("Failed to load Whisper model: {e}"))?;
-
-    cache.path = Some(model_path.to_path_buf());
-    cache.ctx = Some(ctx);
-    log::info!("[speech] Whisper model ready");
-    Ok(())
+    ensure_gguf_loaded(model_path)
 }
 
 fn get_ort_dylib_path() -> Result<PathBuf, String> {
@@ -191,10 +141,8 @@ pub fn transcribe(
 
     if model_path.is_dir() {
         transcribe_parakeet(&samples, model_path)
-    } else if is_gguf(model_path) {
-        transcribe_gguf(&samples, model_path, language)
     } else {
-        transcribe_whisper(&samples, model_path, language)
+        transcribe_gguf(&samples, model_path, language)
     }
 }
 
@@ -224,65 +172,6 @@ fn transcribe_gguf(samples: &[f32], model_path: &Path, language: &str) -> Result
         .map_err(|e| format!("transcribe-cpp inference error: {e}"))?;
 
     Ok(result.text.trim().to_string())
-}
-
-fn transcribe_whisper(samples: &[f32], model_path: &Path, language: &str) -> Result<String, String> {
-    use whisper_rs::{FullParams, SamplingStrategy};
-
-    ensure_whisper_loaded(model_path)?;
-
-    let cache = whisper_cache().lock();
-    let ctx = cache
-        .ctx
-        .as_ref()
-        .ok_or_else(|| "Whisper model not loaded".to_string())?;
-
-    let mut state = ctx.create_state().map_err(|e| e.to_string())?;
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
-    // "auto" lets Whisper detect the spoken language; otherwise force decoding
-    // in the requested language (English-only model files ignore this anyway).
-    params.set_language(if language == "auto" { None } else { Some(language) });
-    // Suppress common Whisper hallucination on short clips
-    params.set_suppress_blank(true);
-    params.set_no_speech_thold(0.6);
-
-    state
-        .full(params, samples)
-        .map_err(|e| format!("Whisper inference error: {e}"))?;
-
-    let num_segments = state.full_n_segments().map_err(|e| e.to_string())?;
-    let mut result = String::new();
-    for i in 0..num_segments {
-        if let Ok(text) = state.full_get_segment_text(i) {
-            result.push_str(&text);
-        }
-    }
-
-    // Clean common whisper artifacts
-    let cleaned = result
-        .trim()
-        .trim_matches(|c| c == '[' || c == ']' || c == '(' || c == ')')
-        .trim();
-
-    // Drop pure noise tokens Whisper sometimes emits
-    let lower = cleaned.to_lowercase();
-    if lower.is_empty()
-        || lower == "you"
-        || lower == "thank you"
-        || lower == "thanks for watching"
-        || lower.starts_with("[blank")
-        || lower.starts_with("(blank")
-    {
-        // Keep short real utterances; only drop known hallucinations when very short audio
-        if samples.len() < 16_000 * 2 && (lower == "you" || lower.contains("blank")) {
-            return Ok(String::new());
-        }
-    }
-
-    Ok(cleaned.to_string())
 }
 
 fn transcribe_parakeet(samples: &[f32], model_dir: &Path) -> Result<String, String> {

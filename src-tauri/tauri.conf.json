@@ -56,7 +56,9 @@
     ],
     "macOS": {
       "entitlements": "./Entitlements.plist",
-      "infoPlist": "./Info.plist"
+      "infoPlist": "./Info.plist",
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
     },
     "resources": [
       "resources/**/*"

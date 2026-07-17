@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "PATH=\"/opt/homebrew/bin:/usr/local/opt/rustup/bin:/usr/local/bin:$PATH\" ORT_DYLIB_PATH=\"$([ -f /opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib ] && echo /opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib || echo /usr/local/opt/onnxruntime/lib/libonnxruntime.dylib)\" tauri",
+    "tauri": "PATH=\"/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:/usr/local/opt/rustup/bin:/usr/local/bin:$PATH\" ORT_DYLIB_PATH=\"$([ -f /opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib ] && echo /opt/homebrew/opt/onnxruntime/lib/libonnxruntime.dylib || echo /usr/local/opt/onnxruntime/lib/libonnxruntime.dylib)\" tauri",
     "clean": "rm -rf src-tauri/target dist && echo 'Cleaned target/ and dist/'"
   },
   "dependencies": {
