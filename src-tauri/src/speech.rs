@@ -1,17 +1,17 @@
 // speech.rs — Local speech recognition via transcribe-cpp (GGUF) + Parakeet (ONNX).
 // Model loads once and stays warm until the user switches or deletes it.
 
-use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::OnceLock;
 
 static ORT_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// GGUF/GGML model cache (transcribe-cpp) — the single engine behind every
-/// architecture in the model catalog (Whisper, Parakeet, Canary, Moonshine,
-/// SenseVoice, GigaAM, Cohere, Voxtral, Qwen3-ASR, Granite-Speech, FunASR,
-/// MedASR) auto-detected from the GGUF file header.
+/// GGUF/GGML model inference (transcribe-cpp) — the single engine behind
+/// every architecture in the model catalog (Whisper, Parakeet, Canary,
+/// Moonshine, SenseVoice, GigaAM, Cohere, Voxtral, Qwen3-ASR,
+/// Granite-Speech, FunASR, MedASR) auto-detected from the GGUF file header.
 ///
 /// Whisper models used to run through the separate `whisper-rs` crate, which
 /// vendors its own copy of ggml. Statically linking that alongside
@@ -22,35 +22,91 @@ static ORT_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// layouts/ABI), corrupting memory. Everything now goes through this one
 /// engine instead, matching Handy (which has no whisper-rs dependency at all
 /// — every catalog model, including Whisper, is GGUF via transcribe-cpp).
-struct GgufCache {
-    path: Option<PathBuf>,
-    session: Option<transcribe_cpp::Session>,
+///
+/// All GGUF/Metal work runs on one dedicated, persistent OS thread (below),
+/// not wherever `tokio::task::spawn_blocking` or an ad-hoc `std::thread::spawn`
+/// happens to land. transcribe-cpp's Metal backend keeps a residency-set
+/// object alive across calls (`ggml_metal_rsets_init: ... keep_alive`); the
+/// crate never documents it as safe to touch from a different OS thread than
+/// the one that created it, and this app previously called into the cached
+/// session from cargo's tokio blocking pool (a different thread most calls),
+/// a fresh `std::thread::spawn` for background preloads, and Tauri's own
+/// sync-command dispatch thread — a plausible cross-thread Metal/ggml
+/// violation, and it matches the observed crash: `ggml-metal-device.m: GGML_ASSERT(
+/// [rsets->data count] == 0) failed`. Giving the cache exclusive ownership to
+/// one thread removes the cross-thread access entirely instead of guessing
+/// at which specific call was unsafe.
+enum GgufJob {
+    EnsureLoaded {
+        model_path: PathBuf,
+        respond: std_mpsc::Sender<Result<(), String>>,
+    },
+    Unload,
+    Run {
+        samples: Vec<f32>,
+        model_path: PathBuf,
+        language: String,
+        respond: std_mpsc::Sender<Result<String, String>>,
+    },
 }
 
-static GGUF_CACHE: OnceLock<Mutex<GgufCache>> = OnceLock::new();
+fn gguf_worker() -> &'static std_mpsc::Sender<GgufJob> {
+    static TX: OnceLock<std_mpsc::Sender<GgufJob>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std_mpsc::channel::<GgufJob>();
+        std::thread::Builder::new()
+            .name("speech-gguf-worker".into())
+            .spawn(move || {
+                transcribe_cpp::init_logging();
+                if let Err(e) = transcribe_cpp::init_backends_default() {
+                    log::warn!("[speech] transcribe-cpp backend init failed: {e}");
+                }
 
-fn gguf_cache() -> &'static Mutex<GgufCache> {
-    GGUF_CACHE.get_or_init(|| {
-        Mutex::new(GgufCache {
-            path: None,
-            session: None,
-        })
+                // Owned exclusively by this thread — no Mutex needed, and no
+                // other thread ever touches transcribe-cpp state.
+                let mut cache: Option<(PathBuf, transcribe_cpp::Session)> = None;
+
+                for job in rx {
+                    match job {
+                        GgufJob::EnsureLoaded {
+                            model_path,
+                            respond,
+                        } => {
+                            let result = ensure_loaded(&mut cache, &model_path);
+                            let _ = respond.send(result);
+                        }
+                        GgufJob::Unload => {
+                            cache = None;
+                            log::info!("[speech] Unloaded cached model");
+                        }
+                        GgufJob::Run {
+                            samples,
+                            model_path,
+                            language,
+                            respond,
+                        } => {
+                            let result = ensure_loaded(&mut cache, &model_path).and_then(|()| {
+                                let (_, session) = cache.as_mut().expect("just ensured loaded");
+                                run_gguf_session(session, &samples, &language)
+                            });
+                            let _ = respond.send(result);
+                        }
+                    }
+                }
+            })
+            .expect("failed to spawn speech-gguf-worker thread");
+        tx
     })
 }
 
-/// One-time transcribe-cpp init (logging + compute backend selection). Call
-/// once at app startup, before any GGUF model is loaded.
-pub fn init_transcribe_cpp() {
-    transcribe_cpp::init_logging();
-    if let Err(e) = transcribe_cpp::init_backends_default() {
-        log::warn!("[speech] transcribe-cpp backend init failed: {e}");
-    }
-}
-
-fn ensure_gguf_loaded(model_path: &Path) -> Result<(), String> {
-    let mut cache = gguf_cache().lock();
-    if cache.path.as_ref().map(|p| p.as_path()) == Some(model_path) && cache.session.is_some() {
-        return Ok(());
+fn ensure_loaded(
+    cache: &mut Option<(PathBuf, transcribe_cpp::Session)>,
+    model_path: &Path,
+) -> Result<(), String> {
+    if let Some((cached_path, _)) = cache.as_ref() {
+        if cached_path == model_path {
+            return Ok(());
+        }
     }
 
     log::info!("[speech] Loading GGUF model from {}", model_path.display());
@@ -60,19 +116,45 @@ fn ensure_gguf_loaded(model_path: &Path) -> Result<(), String> {
         .session()
         .map_err(|e| format!("Failed to create transcribe-cpp session: {e}"))?;
 
-    cache.path = Some(model_path.to_path_buf());
-    cache.session = Some(session);
+    *cache = Some((model_path.to_path_buf(), session));
     log::info!("[speech] GGUF model ready");
     Ok(())
 }
 
+fn run_gguf_session(
+    session: &mut transcribe_cpp::Session,
+    samples: &[f32],
+    language: &str,
+) -> Result<String, String> {
+    use transcribe_cpp::{RunOptions, Task};
+
+    let run_options = RunOptions {
+        task: Task::Transcribe,
+        language: if language == "auto" {
+            None
+        } else {
+            Some(language.to_string())
+        },
+        ..Default::default()
+    };
+
+    let result = session
+        .run(samples, &run_options)
+        .map_err(|e| format!("transcribe-cpp inference error: {e}"))?;
+
+    Ok(result.text.trim().to_string())
+}
+
+/// One-time transcribe-cpp init. Actually runs lazily on the dedicated GGUF
+/// worker thread the first time it's touched — this just forces that thread
+/// to spawn now, at app startup, instead of on the first real transcription.
+pub fn init_transcribe_cpp() {
+    let _ = gguf_worker();
+}
+
 /// Drop any cached model (call when the active model is deleted or switched).
 pub fn unload_model() {
-    let mut gguf = gguf_cache().lock();
-    gguf.path = None;
-    gguf.session = None;
-
-    log::info!("[speech] Unloaded cached model");
+    let _ = gguf_worker().send(GgufJob::Unload);
 }
 
 /// Preload a model into memory so the first real transcription is fast.
@@ -81,7 +163,14 @@ pub fn preload_model(model_path: &Path) -> Result<(), String> {
         // Parakeet is loaded per-call for now (ONNX session management is messier).
         return Ok(());
     }
-    ensure_gguf_loaded(model_path)
+    let (tx, rx) = std_mpsc::channel();
+    gguf_worker()
+        .send(GgufJob::EnsureLoaded {
+            model_path: model_path.to_path_buf(),
+            respond: tx,
+        })
+        .map_err(|_| "speech worker unavailable".to_string())?;
+    rx.recv().map_err(|_| "speech worker gone".to_string())?
 }
 
 fn get_ort_dylib_path() -> Result<PathBuf, String> {
@@ -153,36 +242,17 @@ pub fn transcribe_samples(
     if model_path.is_dir() {
         transcribe_parakeet(samples, model_path)
     } else {
-        transcribe_gguf(samples, model_path, language)
+        let (tx, rx) = std_mpsc::channel();
+        gguf_worker()
+            .send(GgufJob::Run {
+                samples: samples.to_vec(),
+                model_path: model_path.to_path_buf(),
+                language: language.to_string(),
+                respond: tx,
+            })
+            .map_err(|_| "speech worker unavailable".to_string())?;
+        rx.recv().map_err(|_| "speech worker gone".to_string())?
     }
-}
-
-fn transcribe_gguf(samples: &[f32], model_path: &Path, language: &str) -> Result<String, String> {
-    use transcribe_cpp::{RunOptions, Task};
-
-    ensure_gguf_loaded(model_path)?;
-
-    let mut cache = gguf_cache().lock();
-    let session = cache
-        .session
-        .as_mut()
-        .ok_or_else(|| "GGUF model not loaded".to_string())?;
-
-    let run_options = RunOptions {
-        task: Task::Transcribe,
-        language: if language == "auto" {
-            None
-        } else {
-            Some(language.to_string())
-        },
-        ..Default::default()
-    };
-
-    let result = session
-        .run(samples, &run_options)
-        .map_err(|e| format!("transcribe-cpp inference error: {e}"))?;
-
-    Ok(result.text.trim().to_string())
 }
 
 fn transcribe_parakeet(samples: &[f32], model_dir: &Path) -> Result<String, String> {
