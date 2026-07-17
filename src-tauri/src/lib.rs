@@ -64,6 +64,15 @@ pub struct AppSettings {
     /// "system" | "light" | "dark"
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Never show a Dock icon, even while a window (e.g. Settings) is open.
+    /// The app is still reachable via the tray icon.
+    #[serde(default)]
+    pub hide_dock_icon: bool,
+    /// Periodically re-transcribe audio while recording so the HUD shows a
+    /// gradually-updating preview instead of only the final text. Costs
+    /// extra inference passes, so it's opt-in.
+    #[serde(default)]
+    pub live_preview: bool,
 }
 
 fn default_true() -> bool {
@@ -100,6 +109,8 @@ impl Default for AppSettings {
             language: default_language(),
             silence_threshold: default_silence_threshold(),
             theme: default_theme(),
+            hide_dock_icon: false,
+            live_preview: false,
         }
     }
 }
@@ -252,6 +263,25 @@ fn get_audio_level(state: State<'_, AppState>) -> f32 {
     state.recorder.lock().get_level().min(1.0)
 }
 
+/// Re-transcribes the audio captured so far in the current recording, for a
+/// "live preview" that updates gradually instead of only showing text once
+/// recording stops. Runs the same model/engine as the final transcript, just
+/// against a growing in-memory buffer instead of the finalized WAV file.
+#[tauri::command]
+fn get_partial_transcript(state: State<'_, AppState>) -> Result<String, String> {
+    if !*state.is_recording.lock() {
+        return Ok(String::new());
+    }
+    let samples = state.recorder.lock().snapshot_samples();
+    if samples.len() < 16_000 {
+        // Less than 1s of audio — not worth a pass.
+        return Ok(String::new());
+    }
+    let settings = state.settings.lock().clone();
+    let model_path = model_manager::resolved_model_path(&settings.model);
+    speech::transcribe_samples(&samples, &model_path, &settings.language, settings.silence_threshold)
+}
+
 #[tauri::command]
 fn get_history(state: State<'_, AppState>) -> Vec<TranscriptEntry> {
     state.transcript_history.lock().iter().cloned().collect()
@@ -271,9 +301,20 @@ fn save_settings(
     let old = state.settings.lock().clone();
     let model_changed = old.model != settings.model;
     let hotkey_changed = old.hotkey != settings.hotkey;
+    let dock_changed = old.hide_dock_icon != settings.hide_dock_icon;
 
     *state.settings.lock() = settings.clone();
     persist_settings(&settings)?;
+
+    #[cfg(target_os = "macos")]
+    if dock_changed {
+        let policy = if settings.hide_dock_icon {
+            tauri::ActivationPolicy::Accessory
+        } else {
+            tauri::ActivationPolicy::Regular
+        };
+        let _ = app.set_activation_policy(policy);
+    }
 
     if model_changed {
         speech::unload_model();
@@ -626,6 +667,35 @@ fn show_settings_window(app: AppHandle) {
     }
 }
 
+/// Shows + positions the HUD overlay directly from Rust, driven by the
+/// global-shortcut handler itself rather than a frontend event round-trip.
+/// The frontend still owns hiding it (state transitions need a delay to show
+/// "done"/"error" before disappearing) — this only guarantees the overlay
+/// reliably *appears* the instant the shortcut fires.
+fn show_hud_window(app: &AppHandle) {
+    let show_overlay = app
+        .try_state::<AppState>()
+        .map(|s| s.settings.lock().show_overlay)
+        .unwrap_or(true);
+    if !show_overlay {
+        return;
+    }
+    let Some(win) = app.get_webview_window("hud") else {
+        return;
+    };
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let size = monitor.size();
+        let screen_w = size.width as f64 / scale;
+        let screen_h = size.height as f64 / scale;
+        let hud_w = 360.0;
+        let x = ((screen_w - hud_w) / 2.0).round();
+        let y = (screen_h - 130.0).round();
+        let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+    }
+    let _ = win.show();
+}
+
 /// Fully quit so Accessibility grants apply on next launch.
 #[tauri::command]
 fn quit_app(app: AppHandle) {
@@ -650,6 +720,7 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| match event.state() {
                     ShortcutState::Pressed => {
+                        show_hud_window(app);
                         let _ = app.emit("shortcut-pressed", ());
                     }
                     ShortcutState::Released => {
@@ -673,10 +744,21 @@ pub fn run() {
     builder
         .manage(app_state)
         .setup(move |app| {
-            // Regular (not Accessory): shows in Dock and makes Accessibility grants
-            // attach reliably. Agent-only apps often never appear as "trusted".
+            // Regular (not Accessory) by default: shows in Dock and makes
+            // Accessibility grants attach reliably. Agent-only apps often never
+            // appear as "trusted". Accessory only when the user explicitly opts
+            // in via the "hide_dock_icon" setting — the tray icon stays either
+            // way, so the app remains reachable.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Regular);
+            {
+                let hide_dock = app.state::<AppState>().settings.lock().hide_dock_icon;
+                let policy = if hide_dock {
+                    tauri::ActivationPolicy::Accessory
+                } else {
+                    tauri::ActivationPolicy::Regular
+                };
+                app.set_activation_policy(policy);
+            }
 
             app.global_shortcut()
                 .register(default_hotkey.as_str())
@@ -749,6 +831,7 @@ pub fn run() {
             start_recording,
             stop_recording_and_transcribe,
             get_audio_level,
+            get_partial_transcript,
             get_history,
             get_settings,
             save_settings,

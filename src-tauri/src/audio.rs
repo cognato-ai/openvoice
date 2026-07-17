@@ -13,6 +13,10 @@ pub struct AudioRecorder {
     stream: Option<SendSyncStream>,
     writer: Arc<Mutex<Option<WavWriter<BufWriter<std::fs::File>>>>>,
     pub level: Arc<Mutex<f32>>,
+    /// Mirrors the WAV writer's 16 kHz mono samples in memory so a live
+    /// preview can snapshot "audio so far" without touching the on-disk file
+    /// (whose RIFF header isn't valid to read until `finalize()`).
+    samples: Arc<Mutex<Vec<f32>>>,
 }
 
 impl AudioRecorder {
@@ -21,7 +25,13 @@ impl AudioRecorder {
             stream: None,
             writer: Arc::new(Mutex::new(None)),
             level: Arc::new(Mutex::new(0.0)),
+            samples: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Snapshot of the samples captured so far in the current recording.
+    pub fn snapshot_samples(&self) -> Vec<f32> {
+        self.samples.lock().clone()
     }
 
     pub fn start(&mut self, output_path: PathBuf, device_name: &str) -> Result<(), String> {
@@ -63,9 +73,11 @@ impl AudioRecorder {
 
         let writer_arc = self.writer.clone();
         *writer_arc.lock() = Some(writer);
+        self.samples.lock().clear();
 
         let level_arc = self.level.clone();
         let writer_clone = self.writer.clone();
+        let samples_clone = self.samples.clone();
 
         let resample_ratio = 16000.0 / sample_rate as f64;
         let mut resample_buf: Vec<f64> = Vec::new();
@@ -105,10 +117,11 @@ impl AudioRecorder {
                     }
 
                     if let Some(ref mut w) = *writer_clone.lock() {
-                        for sample in out_samples {
+                        for &sample in &out_samples {
                             let _ = w.write_sample(sample);
                         }
                     }
+                    samples_clone.lock().extend_from_slice(&out_samples);
                 },
                 |err| eprintln!("[audio] stream error: {err}"),
                 None,
@@ -130,6 +143,7 @@ impl AudioRecorder {
         }
 
         *self.level.lock() = 0.0;
+        self.samples.lock().clear();
         Ok(())
     }
 

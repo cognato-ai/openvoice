@@ -128,6 +128,18 @@ pub fn transcribe(
     silence_threshold: f32,
 ) -> Result<String, String> {
     let samples = read_wav_samples(wav_path)?;
+    transcribe_samples(&samples, model_path, language, silence_threshold)
+}
+
+/// Same as `transcribe`, but for an in-memory sample buffer — used for both
+/// the final transcript and the "live preview" partial re-transcribe of
+/// audio captured so far while still recording.
+pub fn transcribe_samples(
+    samples: &[f32],
+    model_path: &Path,
+    language: &str,
+    silence_threshold: f32,
+) -> Result<String, String> {
     if samples.is_empty() {
         return Ok(String::new());
     }
@@ -135,14 +147,13 @@ pub fn transcribe(
     // Skip near-silence so we don't waste inference and spam empty results.
     let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
     if rms < silence_threshold {
-        log::info!("[speech] Audio too quiet (rms={rms:.5}), skipping");
         return Ok(String::new());
     }
 
     if model_path.is_dir() {
-        transcribe_parakeet(&samples, model_path)
+        transcribe_parakeet(samples, model_path)
     } else {
-        transcribe_gguf(&samples, model_path, language)
+        transcribe_gguf(samples, model_path, language)
     }
 }
 

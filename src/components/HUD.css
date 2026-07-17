@@ -60,10 +60,31 @@
 .hud__center {
   flex: 1;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
   overflow: hidden;
   min-width: 0;
+  width: 100%;
+}
+
+.hud__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hud__preview {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  width: 100%;
 }
 
 .hud__waveform {

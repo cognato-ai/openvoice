@@ -45,6 +45,8 @@ interface AppSettings {
   language?: string;
   silence_threshold?: number;
   theme?: string;
+  hide_dock_icon?: boolean;
+  live_preview?: boolean;
 }
 
 const LANGUAGES: [string, string][] = [
@@ -323,6 +325,8 @@ export default function Settings() {
       language: "auto",
       silence_threshold: 0.005,
       theme: "system",
+      hide_dock_icon: false,
+      live_preview: false,
       ...s,
     });
     setPerms(p);
@@ -983,6 +987,36 @@ export default function Settings() {
                   <div className="s-card__title">Launch at login</div>
                   <p className="s-card__desc" style={{ marginBottom: 0 }}>
                     Start OpenVoice automatically when you log in.
+                  </p>
+                </div>
+              </label>
+
+              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={!!settings.live_preview}
+                  onChange={(e) => setSettings({ ...settings, live_preview: e.target.checked })}
+                />
+                <div>
+                  <div className="s-card__title">Live preview while recording</div>
+                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                    Gradually show a rough transcript in the overlay as you speak, instead of
+                    only after you stop. Uses extra CPU/GPU during recording.
+                  </p>
+                </div>
+              </label>
+
+              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={!!settings.hide_dock_icon}
+                  onChange={(e) => setSettings({ ...settings, hide_dock_icon: e.target.checked })}
+                />
+                <div>
+                  <div className="s-card__title">Hide Dock icon</div>
+                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                    Never show in the Dock, even while this Settings window is open. Still
+                    reachable from the menu bar tray icon.
                   </p>
                 </div>
               </label>

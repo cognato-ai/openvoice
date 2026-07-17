@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalPosition, LogicalSize } from "@tauri-apps/api/window";
 import "./HUD.css";
 
 type RecordingState = "idle" | "recording" | "transcribing" | "done" | "error";
@@ -11,16 +11,21 @@ interface AppSettings {
   output_mode: string;
   hotkey: string;
   recording_mode: string;
+  live_preview?: boolean;
 }
 
-async function positionHUD() {
+const HUD_W = 360;
+const HUD_H = 72;
+const HUD_H_PREVIEW = 108;
+
+async function positionHUD(height = HUD_H) {
   try {
     const win = getCurrentWindow();
     const screenW = window.screen.width;
     const screenH = window.screen.height;
-    const hudW = 360;
-    const x = Math.round((screenW - hudW) / 2);
-    const y = screenH - 130;
+    const x = Math.round((screenW - HUD_W) / 2);
+    const y = screenH - 130 - (height - HUD_H);
+    await win.setSize(new LogicalSize(HUD_W, height));
     await win.setPosition(new LogicalPosition(x, y));
   } catch {
     /* ignore */
@@ -32,15 +37,18 @@ export default function HUD() {
   const [level, setLevel] = useState(0);
   const [lastText, setLastText] = useState("");
   const [elapsedSecs, setElapsedSecs] = useState(0);
+  const [previewText, setPreviewText] = useState("");
 
   const levelTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const recordingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const previewTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const isRecordingRef = useRef(false);
   const settingsRef = useRef<AppSettings>({
-    model: "ggml-tiny.en.bin",
+    model: "whisper-tiny.en",
     output_mode: "type",
-    hotkey: "CommandOrControl+Shift+Space",
+    hotkey: "Alt+Space",
     recording_mode: "ptt",
+    live_preview: false,
   });
 
   useEffect(() => {
@@ -83,6 +91,7 @@ export default function HUD() {
       isRecordingRef.current = true;
       setState("recording");
       setElapsedSecs(0);
+      setPreviewText("");
     } catch (e: unknown) {
       const msg = typeof e === "string" ? e : "Failed to start recording";
       setLastText(msg);
@@ -151,6 +160,15 @@ export default function HUD() {
   }, [startRecording, stopRecording]);
 
   useEffect(() => {
+    if (state === "recording" && previewText) {
+      positionHUD(HUD_H_PREVIEW);
+    } else if (state !== "recording") {
+      // reset for next time; showHUD() also re-positions at HUD_H on start
+      positionHUD(HUD_H);
+    }
+  }, [state, previewText]);
+
+  useEffect(() => {
     if (state === "recording") {
       levelTimer.current = setInterval(async () => {
         const lvl = await invoke<number>("get_audio_level");
@@ -159,14 +177,26 @@ export default function HUD() {
       recordingTimer.current = setInterval(() => {
         setElapsedSecs((s) => s + 1);
       }, 1000);
+      if (settingsRef.current.live_preview) {
+        previewTimer.current = setInterval(async () => {
+          try {
+            const text = await invoke<string>("get_partial_transcript");
+            if (text) setPreviewText(text);
+          } catch {
+            /* ignore — try again next tick */
+          }
+        }, 1800);
+      }
     } else {
       if (levelTimer.current) clearInterval(levelTimer.current);
       if (recordingTimer.current) clearInterval(recordingTimer.current);
+      if (previewTimer.current) clearInterval(previewTimer.current);
       setLevel(0);
     }
     return () => {
       if (levelTimer.current) clearInterval(levelTimer.current);
       if (recordingTimer.current) clearInterval(recordingTimer.current);
+      if (previewTimer.current) clearInterval(previewTimer.current);
     };
   }, [state]);
 
@@ -192,21 +222,28 @@ export default function HUD() {
       <div className="hud__center">
         {state === "recording" && (
           <>
-            <div className="hud__waveform">
-              {[0, 1, 2, 3, 4, 5, 6].map((i) => (
-                <div
-                  key={i}
-                  className="hud__bar"
-                  style={
-                    {
-                      "--delay": `${i * 0.08}s`,
-                      "--level": level,
-                    } as React.CSSProperties
-                  }
-                />
-              ))}
+            <div className="hud__row">
+              <div className="hud__waveform">
+                {[0, 1, 2, 3, 4, 5, 6].map((i) => (
+                  <div
+                    key={i}
+                    className="hud__bar"
+                    style={
+                      {
+                        "--delay": `${i * 0.08}s`,
+                        "--level": level,
+                      } as React.CSSProperties
+                    }
+                  />
+                ))}
+              </div>
+              <div className="hud__timer">{formatTime(elapsedSecs)}</div>
             </div>
-            <div className="hud__timer">{formatTime(elapsedSecs)}</div>
+            {previewText && (
+              <div className="hud__preview" title={previewText}>
+                {previewText.length > 70 ? "…" + previewText.slice(-67) : previewText}
+              </div>
+            )}
           </>
         )}
         {state === "transcribing" && (
