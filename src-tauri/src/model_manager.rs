@@ -220,38 +220,66 @@ struct CatalogFile {
     size_bytes: u64,
 }
 
+/// Models empirically confirmed to return an empty transcript for real
+/// speech via transcribe-cpp on this engine version (verified by feeding
+/// synthesized speech directly to the engine, not a guess) — an upstream
+/// architecture-specific decoder bug, not something fixable from our side.
+/// canary-180m-flash was also the catalog's top-recommended, highest
+/// speed-scored entry, so the ranking added in this same session actively
+/// promoted it to #1 — exactly what a user would pick, and exactly what
+/// silently produced nothing. Demoted here rather than deleted, since other
+/// canary variants are untested and may be fine.
+const KNOWN_BROKEN_SLUGS: &[&str] = &["canary-180m-flash"];
+
 fn load_catalog() -> &'static [CatalogModel] {
     static CATALOG: OnceLock<Vec<CatalogModel>> = OnceLock::new();
     CATALOG
         .get_or_init(|| {
-            // 1) Always try embedded catalog first (works in tauri dev + release)
-            if let Ok(root) = serde_json::from_str::<CatalogRoot>(EMBEDDED_CATALOG) {
-                log::info!("[catalog] embedded: {} models", root.models.len());
-                return root.models;
-            }
-            // 2) Disk fallbacks
-            let candidates = [
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|p| p.parent().map(|d| d.join("resources/catalog.json"))),
-                std::env::current_exe().ok().and_then(|p| {
-                    p.parent()
-                        .map(|d| d.join("../Resources/resources/catalog.json"))
-                }),
-                Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/catalog.json")),
-            ];
-            for c in candidates.into_iter().flatten() {
-                if let Ok(raw) = fs::read_to_string(&c) {
-                    if let Ok(root) = serde_json::from_str::<CatalogRoot>(&raw) {
-                        log::info!("[catalog] disk: {} from {}", root.models.len(), c.display());
-                        return root.models;
-                    }
+            let mut models = load_catalog_raw();
+            for m in &mut models {
+                if KNOWN_BROKEN_SLUGS.contains(&m.slug.as_str()) {
+                    m.recommended = false;
+                    m.recommended_rank = None;
+                    m.speed_score = None;
+                    m.accuracy_score = None;
+                    m.description = format!(
+                        "⚠ Known issue: produces no transcript for real speech on this engine. {}",
+                        m.description
+                    );
                 }
             }
-            log::error!("[catalog] FAILED to load catalog.json");
-            Vec::new()
+            models
         })
         .as_slice()
+}
+
+fn load_catalog_raw() -> Vec<CatalogModel> {
+    // 1) Always try embedded catalog first (works in tauri dev + release)
+    if let Ok(root) = serde_json::from_str::<CatalogRoot>(EMBEDDED_CATALOG) {
+        log::info!("[catalog] embedded: {} models", root.models.len());
+        return root.models;
+    }
+    // 2) Disk fallbacks
+    let candidates = [
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("resources/catalog.json"))),
+        std::env::current_exe().ok().and_then(|p| {
+            p.parent()
+                .map(|d| d.join("../Resources/resources/catalog.json"))
+        }),
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/catalog.json")),
+    ];
+    for c in candidates.into_iter().flatten() {
+        if let Ok(raw) = fs::read_to_string(&c) {
+            if let Ok(root) = serde_json::from_str::<CatalogRoot>(&raw) {
+                log::info!("[catalog] disk: {} from {}", root.models.len(), c.display());
+                return root.models;
+            }
+        }
+    }
+    log::error!("[catalog] FAILED to load catalog.json");
+    Vec::new()
 }
 
 /// Full model list for the UI, ranked by effectiveness: recommended models
@@ -303,8 +331,12 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
         let size_bytes = file.map(|f| f.size_bytes).unwrap_or(0);
 
         // Every catalog entry is a GGUF file transcribe-cpp can run —
-        // architecture is auto-detected from the file header.
-        let (name, runnable, downloaded) = (m.slug.clone(), true, is_model_downloaded(&m.slug));
+        // architecture is auto-detected from the file header. Except known
+        // broken ones (see KNOWN_BROKEN_SLUGS): mark unrunnable so the UI
+        // can't be used to select them at all, not just deprioritized.
+        let is_broken = KNOWN_BROKEN_SLUGS.contains(&m.slug.as_str());
+        let (name, runnable, downloaded) =
+            (m.slug.clone(), !is_broken, is_model_downloaded(&m.slug));
 
         let speed = m
             .speed_score

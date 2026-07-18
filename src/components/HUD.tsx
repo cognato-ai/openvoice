@@ -190,7 +190,18 @@ export default function HUD() {
         setLevels((prev) => [...prev.slice(1), sample]);
       }, 90);
       recordingTimer.current = setInterval(() => {
-        setElapsedSecs((s) => s + 1);
+        setElapsedSecs((s) => {
+          const next = s + 1;
+          // Safety net: if the shortcut's release is ever missed at the OS
+          // level (some input sources intercept Option+Space specifically,
+          // e.g. for non-breaking-space / Character Viewer), the overlay
+          // must not stay open forever waiting for a release that never
+          // comes. Force a stop well past any real utterance.
+          if (next >= 60) {
+            stopRecording();
+          }
+          return next;
+        });
       }, 1000);
       if (settingsRef.current.live_preview) {
         previewTimer.current = setInterval(async () => {
@@ -213,7 +224,7 @@ export default function HUD() {
       if (recordingTimer.current) clearInterval(recordingTimer.current);
       if (previewTimer.current) clearInterval(previewTimer.current);
     };
-  }, [state]);
+  }, [state, stopRecording]);
 
   const isPtt = settingsRef.current.recording_mode !== "toggle";
 

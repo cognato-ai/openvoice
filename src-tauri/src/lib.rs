@@ -767,10 +767,12 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| match event.state() {
                     ShortcutState::Pressed => {
+                        log::info!("[shortcut] Pressed");
                         show_hud_window(app);
                         let _ = app.emit("shortcut-pressed", ());
                     }
                     ShortcutState::Released => {
+                        log::info!("[shortcut] Released");
                         let _ = app.emit("shortcut-released", ());
                     }
                 })
