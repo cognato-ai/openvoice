@@ -85,15 +85,24 @@ export default function HUD() {
 
   const startRecording = useCallback(async () => {
     if (isRecordingRef.current) return;
+    // Set this synchronously, before any await. If it were only set after
+    // the awaits below, a fast press+release (completely normal for a short
+    // sentence) could deliver the "released" event while this function is
+    // still mid-flight — at that instant isRecordingRef.current would still
+    // read false, so the release handler's guard would silently no-op and
+    // stopRecording() would never run at all. That's not a hide-mechanism
+    // bug — the code that hides the overlay is simply never invoked, which
+    // is exactly the "overlay never disappears" symptom.
+    isRecordingRef.current = true;
     try {
       settingsRef.current = await invoke<AppSettings>("get_settings");
       await showHUD();
       await invoke("start_recording");
-      isRecordingRef.current = true;
       setState("recording");
       setElapsedSecs(0);
       setPreviewText("");
     } catch (e: unknown) {
+      isRecordingRef.current = false;
       const msg = typeof e === "string" ? e : "Failed to start recording";
       setLastText(msg);
       setState("error");
