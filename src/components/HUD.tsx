@@ -20,7 +20,6 @@ const WAVE_BARS = 16;
 export default function HUD() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [text, setText] = useState("");
-  const [showText, setShowText] = useState(false);
   const [levels, setLevels] = useState<number[]>(Array(WAVE_BARS).fill(0));
   const [elapsed, setElapsed] = useState(0);
   const [preview, setPreview] = useState("");
@@ -38,7 +37,6 @@ export default function HUD() {
     const un = listen<HudState>("hud-state", ({ payload }) => {
       setPhase(payload.phase);
       setText(payload.text);
-      setShowText(payload.show_text);
       if (payload.phase === "recording") {
         setElapsed(0);
         setPreview("");
@@ -79,7 +77,6 @@ export default function HUD() {
     };
   }, [phase]);
 
-  const showResultText = phase === "result" && showText && text && text !== "No speech detected";
   const hasPreview = phase === "recording" && !!preview;
 
   return (
@@ -119,16 +116,11 @@ export default function HUD() {
               </div>
             )}
             {phase === "transcribing" && <span className="hud__text">Transcribing</span>}
-            {phase === "result" &&
-              (showResultText ? (
-                <span className="hud__text hud__text--result" title={text}>
-                  {text.trim()}
-                </span>
-              ) : (
-                <span className="hud__text hud__text--dim">
-                  {text === "No speech detected" ? "No speech" : "Done"}
-                </span>
-              ))}
+            {phase === "result" && (
+              <span className="hud__text hud__text--result" title={text}>
+                {text.trim()}
+              </span>
+            )}
             {phase === "error" && (
               <span className="hud__text hud__text--err" title={text}>
                 {text}

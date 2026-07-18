@@ -349,17 +349,22 @@ fn coordinator_stop(app: &AppHandle) {
                 }
             }
             let _ = app.emit("transcript-updated", ());
-
-            let show = settings.show_transcript_in_overlay;
-            emit_hud(app, "result", text.trim(), show);
             hud_log(&format!("[coord] result ({} chars)", text.trim().len()));
-            // Linger longer when actually showing the text; otherwise just a
-            // brief success flash before it disappears.
-            schedule_hide(app, if show { 2200 } else { 700 });
+
+            if settings.show_transcript_in_overlay {
+                // Opt-in: briefly echo the text before hiding.
+                emit_hud(app, "result", text.trim(), true);
+                schedule_hide(app, 2200);
+            } else {
+                // Default: no "Done" confirmation screen — the text is already
+                // inserted, so the overlay just disappears.
+                schedule_hide(app, 0);
+            }
         }
         Ok(_) => {
-            // Empty transcript: distinguish "no mic signal at all" (denied
-            // permission / wrong device) from "quiet / nothing said".
+            // Empty transcript: only surface the "no mic signal at all" case
+            // (denied permission / wrong device), since that's actionable.
+            // A plain "nothing was said" just hides with no screen.
             let peak = speech::wav_peak_level(&wav_path).unwrap_or(1.0);
             if peak < 0.001 {
                 emit_hud(
@@ -371,9 +376,8 @@ fn coordinator_stop(app: &AppHandle) {
                 hud_log("[coord] empty result, peak≈0 (mic permission?)");
                 schedule_hide(app, 3500);
             } else {
-                emit_hud(app, "result", "No speech detected", false);
                 hud_log("[coord] empty result, signal present");
-                schedule_hide(app, 1500);
+                schedule_hide(app, 0);
             }
         }
         Err(e) => {
