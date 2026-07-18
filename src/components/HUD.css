@@ -1,7 +1,7 @@
-/* Overlay HUD — a compact, dark, premium pill (WisprFlow-inspired). Always
-   dark regardless of app theme: an overlay reads best as a floating dark glass
-   chip over whatever's behind it. The window itself is transparent; this pill
-   is the only painted surface. */
+/* Overlay HUD — a compact, professional dark-glass pill (WisprFlow-inspired).
+   The window itself is transparent; the ONLY painted surface is `.hud__pill`,
+   which is rounded, so nothing ever reads as a translucent rectangle. The pill
+   is centered in the window with transparent margin around it for its shadow. */
 
 * {
   box-sizing: border-box;
@@ -11,8 +11,9 @@ html,
 body,
 #root {
   margin: 0;
+  width: 100%;
   height: 100%;
-  background: transparent;
+  background: transparent !important;
   overflow: hidden;
 }
 
@@ -20,40 +21,42 @@ body,
   width: 100%;
   height: 100%;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
-  padding: 6px;
+  justify-content: center;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   user-select: none;
   cursor: default;
+  background: transparent;
 }
 
+/* Fixed-width pill, centered in the (larger, transparent) window so its soft
+   shadow has room to fade before the window edge. */
 .hud__pill {
-  width: 100%;
-  height: 32px;
-  flex-shrink: 0;
+  width: 180px;
   display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0 12px 0 10px;
-  border-radius: 999px;
-  background: rgba(22, 22, 26, 0.82);
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
-  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 15px;
+  border-radius: 21px;
+  background: linear-gradient(
+    180deg,
+    rgba(40, 40, 47, 0.55),
+    rgba(20, 20, 25, 0.55)
+  );
+  backdrop-filter: blur(36px) saturate(180%);
+  -webkit-backdrop-filter: blur(36px) saturate(180%);
+  border: 0.5px solid rgba(255, 255, 255, 0.13);
   box-shadow:
-    0 6px 24px rgba(0, 0, 0, 0.4),
-    inset 0 0.5px 0 rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.92);
-  animation: hud-in 180ms cubic-bezier(0.2, 0.9, 0.3, 1);
+    0 6px 20px rgba(0, 0, 0, 0.38),
+    inset 0 0.5px 0 rgba(255, 255, 255, 0.11);
+  color: rgba(255, 255, 255, 0.94);
+  animation: hud-in 200ms cubic-bezier(0.2, 0.9, 0.3, 1.1);
 }
 
 @keyframes hud-in {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.96);
+    transform: translateY(8px) scale(0.94);
   }
   to {
     opacity: 1;
@@ -61,11 +64,18 @@ body,
   }
 }
 
+.hud__main {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 24px;
+}
+
 /* ── Lead glyph (left) ─────────────────────────────────────────────── */
 .hud__lead {
   flex-shrink: 0;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -75,24 +85,23 @@ body,
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.55);
 }
 
 .hud__orb--live {
-  background: #ff453a;
-  box-shadow: 0 0 0 0 rgba(255, 69, 58, 0.5);
-  animation: orb-pulse 1.4s ease-out infinite;
+  background: #ff4d4f;
+  animation: orb-pulse 1.5s ease-out infinite;
 }
 
 @keyframes orb-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(255, 69, 58, 0.55);
+    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.55);
   }
   70% {
-    box-shadow: 0 0 0 7px rgba(255, 69, 58, 0);
+    box-shadow: 0 0 0 8px rgba(255, 77, 79, 0);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(255, 69, 58, 0);
+    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0);
   }
 }
 
@@ -102,10 +111,10 @@ body,
   justify-content: center;
 }
 .hud__glyph--ok {
-  color: #30d158;
+  color: #32d74b;
 }
 .hud__glyph--err {
-  color: #ff453a;
+  color: #ff4d4f;
 }
 
 /* Animated "transcribing" dots */
@@ -118,14 +127,14 @@ body,
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.9);
   animation: dot-bounce 1s ease-in-out infinite;
 }
 .hud__dots i:nth-child(2) {
-  animation-delay: 0.15s;
+  animation-delay: 0.16s;
 }
 .hud__dots i:nth-child(3) {
-  animation-delay: 0.3s;
+  animation-delay: 0.32s;
 }
 @keyframes dot-bounce {
   0%,
@@ -136,7 +145,7 @@ body,
   }
   30% {
     opacity: 1;
-    transform: translateY(-2px);
+    transform: translateY(-3px);
   }
 }
 
@@ -152,38 +161,41 @@ body,
 .hud__wave {
   display: flex;
   align-items: center;
-  gap: 3px;
-  height: 18px;
+  gap: 2px;
+  height: 20px;
+  width: 100%;
+  justify-content: space-between;
 }
 
 .hud__wbar {
-  width: 3px;
+  flex: 1;
+  min-width: 2px;
+  max-width: 3px;
   border-radius: 3px;
-  background: linear-gradient(to top, #ff6a3d, #ff453a);
+  background: linear-gradient(to top, #ff7a45, #ff4d4f);
   height: 100%;
   transform-origin: center;
-  transform: scaleY(calc(0.14 + var(--l, 0) * 0.86));
-  transition: transform 80ms ease-out;
+  transform: scaleY(calc(0.12 + var(--l, 0) * 0.88));
+  transition: transform 110ms ease-out;
 }
 
 .hud__text {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
   letter-spacing: 0.1px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: rgba(255, 255, 255, 0.9);
+  color: rgba(255, 255, 255, 0.92);
 }
 .hud__text--dim {
   color: rgba(255, 255, 255, 0.55);
 }
 .hud__text--result {
   color: #fff;
-  font-weight: 500;
 }
 .hud__text--err {
-  color: #ff8a80;
+  color: #ff9a99;
   font-size: 11px;
   white-space: normal;
   line-height: 1.25;
@@ -201,16 +213,19 @@ body,
   color: rgba(255, 255, 255, 0.5);
 }
 
-/* ── Live preview line (below pill) ────────────────────────────────── */
+/* ── Live preview line (below main row, only when enabled) ─────────── */
+.hud__pill--tall {
+  gap: 7px;
+}
 .hud__preview {
-  width: 100%;
-  padding: 4px 12px 6px;
   font-size: 11.5px;
   line-height: 1.35;
-  color: rgba(255, 255, 255, 0.8);
+  color: rgba(255, 255, 255, 0.82);
   text-align: left;
   overflow: hidden;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.1);
+  padding-top: 6px;
 }

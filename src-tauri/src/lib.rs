@@ -837,10 +837,15 @@ fn show_settings_window(app: AppHandle) {
 /// The frontend still owns hiding it (state transitions need a delay to show
 /// "done"/"error" before disappearing) — this only guarantees the overlay
 /// reliably *appears* the instant the shortcut fires.
-const HUD_W: f64 = 260.0;
-const HUD_H: f64 = 44.0;
+// The window is deliberately larger than the visible pill: the pill is
+// centered inside it with a wide TRANSPARENT margin so its soft drop shadow
+// fades to nothing well before the window's rectangular edge. (Too small a
+// margin clips the shadow at the edge and it reads as a translucent
+// rectangle.) Only the rounded pill is ever painted.
+const HUD_W: f64 = 236.0;
+const HUD_H: f64 = 96.0;
 /// Taller variant used only when live preview is on, to fit the rolling text.
-const HUD_H_PREVIEW: f64 = 92.0;
+const HUD_H_PREVIEW: f64 = 168.0;
 
 /// The monitor the HUD should appear on: whichever one currently has the
 /// mouse cursor, so the overlay follows the screen the user is actually
@@ -883,6 +888,9 @@ fn show_hud_window(app: &AppHandle) {
         let Some(win) = app_for_closure.get_webview_window("hud") else {
             return;
         };
+        // Force the macOS window shadow off (the rounded pill draws its own);
+        // a rectangular window shadow would show around the transparent margin.
+        let _ = win.set_shadow(false);
         let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
             width: HUD_W,
             height,
@@ -897,7 +905,9 @@ fn show_hud_window(app: &AppHandle) {
             let screen_w = mon_size.width as f64 / scale;
             let screen_h = mon_size.height as f64 / scale;
             let x = (screen_x + (screen_w - HUD_W) / 2.0).round();
-            let y = (screen_y + screen_h - 130.0).round();
+            // Keep the pill ~110px above the bottom regardless of window height
+            // (the pill is vertically centered within the window).
+            let y = (screen_y + screen_h - 110.0 - height / 2.0).round();
             let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         }
         let _ = win.show();

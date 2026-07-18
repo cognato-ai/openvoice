@@ -3,11 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./HUD.css";
 
-// The recording lifecycle now lives entirely in Rust (a single serialized
-// coordinator driven directly by the shortcut press/release). This component
-// is a pure display of the `hud-state` events it emits — it never decides when
-// to start/stop, and never shows or hides its own window. That removes the
-// whole class of frontend races that used to leave the overlay stuck open.
+// The recording lifecycle lives entirely in Rust (a single serialized
+// coordinator driven by the shortcut press/release). This component is a pure
+// display of the `hud-state` events it emits — it never decides when to
+// start/stop and never shows or hides its own window.
 type Phase = "idle" | "recording" | "transcribing" | "result" | "error";
 
 interface HudState {
@@ -16,7 +15,7 @@ interface HudState {
   show_text: boolean;
 }
 
-const WAVE_BARS = 5;
+const WAVE_BARS = 16;
 
 export default function HUD() {
   const [phase, setPhase] = useState<Phase>("idle");
@@ -51,8 +50,6 @@ export default function HUD() {
     };
   }, []);
 
-  // Poll audio level (waveform) + elapsed + optional live preview, only while
-  // actively recording.
   useEffect(() => {
     if (phase !== "recording") return;
     const levelTimer = setInterval(async () => {
@@ -83,68 +80,71 @@ export default function HUD() {
   }, [phase]);
 
   const showResultText = phase === "result" && showText && text && text !== "No speech detected";
+  const hasPreview = phase === "recording" && !!preview;
 
   return (
-    <div className={`hud hud--${phase}`} data-tauri-drag-region>
-      <div className="hud__pill">
-        <div className="hud__lead">
-          {phase === "transcribing" ? (
-            <span className="hud__dots">
-              <i />
-              <i />
-              <i />
-            </span>
-          ) : phase === "result" ? (
-            <span className="hud__glyph hud__glyph--ok">
-              <CheckIcon />
-            </span>
-          ) : phase === "error" ? (
-            <span className="hud__glyph hud__glyph--err">
-              <ErrorIcon />
-            </span>
-          ) : (
-            <span className={`hud__orb ${phase === "recording" ? "hud__orb--live" : ""}`} />
-          )}
-        </div>
-
-        <div className="hud__body">
-          {phase === "recording" && (
-            <div className="hud__wave">
-              {levels.map((lvl, i) => (
-                <span
-                  key={i}
-                  className="hud__wbar"
-                  style={{ "--l": lvl } as React.CSSProperties}
-                />
-              ))}
-            </div>
-          )}
-          {phase === "transcribing" && <span className="hud__text">Transcribing</span>}
-          {phase === "result" &&
-            (showResultText ? (
-              <span className="hud__text hud__text--result" title={text}>
-                {text.trim()}
+    <div className="hud">
+      <div className={`hud__pill hud__pill--${phase} ${hasPreview ? "hud__pill--tall" : ""}`} data-tauri-drag-region>
+        <div className="hud__main">
+          <div className="hud__lead">
+            {phase === "transcribing" ? (
+              <span className="hud__dots">
+                <i />
+                <i />
+                <i />
+              </span>
+            ) : phase === "result" ? (
+              <span className="hud__glyph hud__glyph--ok">
+                <CheckIcon />
+              </span>
+            ) : phase === "error" ? (
+              <span className="hud__glyph hud__glyph--err">
+                <ErrorIcon />
               </span>
             ) : (
-              <span className="hud__text hud__text--dim">
-                {text === "No speech detected" ? "No speech" : "Done"}
+              <span className={`hud__orb ${phase === "recording" ? "hud__orb--live" : ""}`} />
+            )}
+          </div>
+
+          <div className="hud__body">
+            {phase === "recording" && (
+              <div className="hud__wave">
+                {levels.map((lvl, i) => (
+                  <span
+                    key={i}
+                    className="hud__wbar"
+                    style={{ "--l": lvl } as React.CSSProperties}
+                  />
+                ))}
+              </div>
+            )}
+            {phase === "transcribing" && <span className="hud__text">Transcribing</span>}
+            {phase === "result" &&
+              (showResultText ? (
+                <span className="hud__text hud__text--result" title={text}>
+                  {text.trim()}
+                </span>
+              ) : (
+                <span className="hud__text hud__text--dim">
+                  {text === "No speech detected" ? "No speech" : "Done"}
+                </span>
+              ))}
+            {phase === "error" && (
+              <span className="hud__text hud__text--err" title={text}>
+                {text}
               </span>
-            ))}
-          {phase === "error" && (
-            <span className="hud__text hud__text--err" title={text}>
-              {text}
-            </span>
-          )}
+            )}
+          </div>
+
+          {phase === "recording" && <span className="hud__time">{fmt(elapsed)}</span>}
         </div>
 
-        {phase === "recording" && <span className="hud__time">{fmt(elapsed)}</span>}
+        {hasPreview && (
+          <div className="hud__preview" title={preview}>
+            {preview.length > 100 ? "…" + preview.slice(-97) : preview}
+          </div>
+        )}
       </div>
-
-      {phase === "recording" && preview && (
-        <div className="hud__preview" title={preview}>
-          {preview.length > 90 ? "…" + preview.slice(-87) : preview}
-        </div>
-      )}
     </div>
   );
 }
@@ -157,7 +157,7 @@ function fmt(secs: number) {
 
 function CheckIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="20 6 9 17 4 12" />
     </svg>
   );
@@ -165,7 +165,7 @@ function CheckIcon() {
 
 function ErrorIcon() {
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round">
       <line x1="12" y1="7" x2="12" y2="13" />
       <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
