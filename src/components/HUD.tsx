@@ -14,9 +14,9 @@ interface AppSettings {
   live_preview?: boolean;
 }
 
-const HUD_W = 360;
-const HUD_H = 72;
-const HUD_H_PREVIEW = 108;
+const HUD_W = 280;
+const HUD_H = 48;
+const HUD_H_PREVIEW = 80;
 
 async function positionHUD(height = HUD_H) {
   try {
@@ -110,7 +110,15 @@ export default function HUD() {
     isRecordingRef.current = false;
     setState("transcribing");
     try {
-      const text = await invoke<string>("stop_recording_and_transcribe");
+      // A hang anywhere in the backend chain (a slow first-time model load,
+      // a stuck channel, anything) must never leave the overlay stuck open
+      // forever — bound it and surface a timeout as an error instead.
+      const text = await Promise.race([
+        invoke<string>("stop_recording_and_transcribe"),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject("Timed out waiting for transcription"), 20000),
+        ),
+      ]);
       if (text && text.trim().length > 0) {
         setLastText(text.trim());
         setState("done");

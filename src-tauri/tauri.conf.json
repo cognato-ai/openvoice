@@ -14,8 +14,8 @@
       {
         "label": "hud",
         "title": "OpenVoice HUD",
-        "width": 360,
-        "height": 72,
+        "width": 280,
+        "height": 48,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

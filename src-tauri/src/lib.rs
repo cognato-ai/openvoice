@@ -213,6 +213,7 @@ async fn stop_recording_and_transcribe(
     let wav_path = state.temp_wav_path.clone();
     let language = settings.language.clone();
     let silence_threshold = settings.silence_threshold;
+    let wav_path_for_peak = wav_path.clone();
     let text = tokio::task::spawn_blocking(move || {
         speech::transcribe(&wav_path, &model_path, &language, silence_threshold)
     })
@@ -220,6 +221,22 @@ async fn stop_recording_and_transcribe(
     .map_err(|e| e.to_string())??;
 
     if text.is_empty() {
+        // Peak near true zero (not just quiet speech) almost always means the
+        // mic never delivered real audio — a denied Microphone permission or
+        // wrong input device, not "nothing was said". Surface that instead of
+        // a generic empty result so it's actionable.
+        let peak = tokio::task::spawn_blocking(move || speech::wav_peak_level(&wav_path_for_peak))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(1.0);
+        if peak < 0.001 {
+            return Err(
+                "No microphone input detected. Check System Settings → Privacy & Security → \
+                 Microphone — OpenVoice may need to be re-enabled after an app update."
+                    .into(),
+            );
+        }
         return Ok(String::new());
     }
 
@@ -672,8 +689,8 @@ fn show_settings_window(app: AppHandle) {
 /// The frontend still owns hiding it (state transitions need a delay to show
 /// "done"/"error" before disappearing) — this only guarantees the overlay
 /// reliably *appears* the instant the shortcut fires.
-const HUD_W: f64 = 360.0;
-const HUD_H: f64 = 72.0;
+const HUD_W: f64 = 280.0;
+const HUD_H: f64 = 48.0;
 
 /// The monitor the HUD should appear on: whichever one currently has the
 /// mouse cursor, so the overlay follows the screen the user is actually

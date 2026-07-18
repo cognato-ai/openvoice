@@ -275,6 +275,16 @@ fn transcribe_parakeet(samples: &[f32], model_dir: &Path) -> Result<String, Stri
     Ok(result.text.trim().to_string())
 }
 
+/// Peak absolute sample value in a recorded WAV. Used to tell "no
+/// microphone signal at all" (peak near true zero — almost always a denied
+/// Microphone permission or wrong input device, since even a silent room has
+/// some noise floor) apart from "quiet speech" (peak present, just under the
+/// RMS silence threshold).
+pub fn wav_peak_level(wav_path: &Path) -> Result<f32, String> {
+    let samples = read_wav_samples(wav_path)?;
+    Ok(samples.iter().fold(0.0_f32, |acc, s| acc.max(s.abs())))
+}
+
 fn read_wav_samples(path: &Path) -> Result<Vec<f32>, String> {
     let mut reader = hound::WavReader::open(path).map_err(|e| e.to_string())?;
     let spec = reader.spec();
