@@ -73,6 +73,12 @@ pub struct AppSettings {
     /// extra inference passes, so it's opt-in.
     #[serde(default)]
     pub live_preview: bool,
+    /// After transcribing, show the finished transcript text in the overlay
+    /// for a moment before it hides. Off by default — the text is inserted
+    /// into the focused app anyway, so most people want the overlay to just
+    /// disappear (WisprFlow-style) rather than echo it back.
+    #[serde(default)]
+    pub show_transcript_in_overlay: bool,
 }
 
 fn default_true() -> bool {
@@ -111,6 +117,7 @@ impl Default for AppSettings {
             theme: default_theme(),
             hide_dock_icon: false,
             live_preview: false,
+            show_transcript_in_overlay: false,
         }
     }
 }
@@ -138,6 +145,15 @@ pub struct AppState {
     pub settings: Mutex<AppSettings>,
     pub temp_wav_path: PathBuf,
     pub download_cancel: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+    /// Sender to the single recording-lifecycle coordinator thread. The
+    /// shortcut handler pushes Press/Release here; the coordinator owns the
+    /// start→stop→transcribe→deliver→hide sequence. Set during `setup`.
+    pub coord_tx: Mutex<Option<std::sync::mpsc::Sender<CoordCmd>>>,
+    /// Bumped on every recording start. A delayed overlay-hide captures the
+    /// value at schedule time and only hides if it's unchanged — so a new
+    /// recording started during the previous result's linger never gets its
+    /// overlay yanked away.
+    pub hud_generation: std::sync::atomic::AtomicU64,
 }
 
 impl AppState {
@@ -152,127 +168,259 @@ impl AppState {
             settings: Mutex::new(settings),
             temp_wav_path,
             download_cancel: Mutex::new(None),
+            coord_tx: Mutex::new(None),
+            hud_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
 
-// ─── Tauri Commands ──────────────────────────────────────────────────────────
+// ─── Recording lifecycle coordinator ────────────────────────────────────────
+//
+// The entire record → stop → transcribe → deliver → hide sequence is owned by
+// ONE dedicated thread, driven directly by the global shortcut's press/release.
+// This replaces the previous frontend-driven state machine, which decided
+// start/stop in React from async events and guarded on a mutable ref — a design
+// that could miss a fast release (releasing before the async start finished set
+// the "recording" flag), leaving the overlay stuck open forever. Matching
+// Handy, the source of truth now lives in Rust where press and release are
+// handled synchronously and in order. The frontend HUD is a pure display of the
+// `hud-state` events emitted here.
 
-#[tauri::command]
-fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
-    let mut is_recording = state.is_recording.lock();
-    if *is_recording {
-        return Err("Already recording".into());
-    }
-
-    let settings = state.settings.lock().clone();
-    if !model_manager::is_model_downloaded(&settings.model) {
-        return Err(format!(
-            "No model ready. Open Settings and download “{}” first.",
-            settings.model
-        ));
-    }
-    // Do not hard-block recording when AX reports false — macOS often lags until
-    // a full relaunch, and we fall back to clipboard after transcription.
-
-    state
-        .recorder
-        .lock()
-        .start(state.temp_wav_path.clone(), &settings.microphone)?;
-    *is_recording = true;
-    Ok(())
+/// A press/release of the global shortcut, forwarded to the coordinator.
+pub enum CoordCmd {
+    Press,
+    Release,
 }
 
-#[tauri::command]
-async fn stop_recording_and_transcribe(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
+/// Overlay state pushed to the HUD webview.
+#[derive(Clone, Serialize)]
+struct HudPayload {
+    phase: String, // "recording" | "transcribing" | "result" | "error" | "idle"
+    text: String,
+    show_text: bool,
+}
+
+/// Always-on diagnostic log at app-data/openvoice.log, independent of RUST_LOG
+/// (which is unset when the app is launched from Finder, so env_logger output
+/// is lost). Records the recording lifecycle so a "didn't work" report leaves
+/// real evidence — e.g. a "Pressed" with no matching "Released" would prove the
+/// OS never delivered the key release.
+fn hud_log(msg: &str) {
+    use std::io::Write;
+    log::info!("{msg}");
+    let path = model_manager::app_data_dir().join("openvoice.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{ts} {msg}");
+    }
+}
+
+fn emit_hud(app: &AppHandle, phase: &str, text: &str, show_text: bool) {
+    let _ = app.emit(
+        "hud-state",
+        HudPayload {
+            phase: phase.into(),
+            text: text.into(),
+            show_text,
+        },
+    );
+}
+
+/// Hide the overlay after `delay_ms`, unless a newer recording session has
+/// started in the meantime (generation guard).
+fn schedule_hide(app: &AppHandle, delay_ms: u64) {
+    let app = app.clone();
+    let generation = app
+        .state::<AppState>()
+        .hud_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        let state = app.state::<AppState>();
+        let unchanged =
+            state.hud_generation.load(std::sync::atomic::Ordering::SeqCst) == generation;
+        if unchanged && !*state.is_recording.lock() {
+            hide_hud_window(&app);
+            emit_hud(&app, "idle", "", false);
+        }
+    });
+}
+
+/// Start recording. Returns true if recording actually began.
+fn coordinator_start(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let settings = state.settings.lock().clone();
+
+    if !model_manager::is_model_downloaded(&settings.model) {
+        show_hud_window(app);
+        emit_hud(
+            app,
+            "error",
+            &format!("No model ready — open Settings and download \"{}\".", settings.model),
+            false,
+        );
+        schedule_hide(app, 3500);
+        return false;
+    }
+
+    if let Err(e) = state
+        .recorder
+        .lock()
+        .start(state.temp_wav_path.clone(), &settings.microphone)
+    {
+        show_hud_window(app);
+        emit_hud(app, "error", &e, false);
+        schedule_hide(app, 3500);
+        return false;
+    }
+
+    *state.is_recording.lock() = true;
+    state
+        .hud_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    show_hud_window(app);
+    emit_hud(app, "recording", "", false);
+    hud_log("[coord] recording started");
+    true
+}
+
+/// Stop recording, transcribe, deliver the text, and drive the overlay through
+/// its transcribing/result/error states. Runs entirely on the coordinator
+/// thread, so nothing here races with a subsequent press (those queue behind it).
+fn coordinator_stop(app: &AppHandle) {
+    let state = app.state::<AppState>();
+
     {
         let mut is_recording = state.is_recording.lock();
         if !*is_recording {
-            return Err("Not currently recording".into());
+            return;
         }
-        state.recorder.lock().stop()?;
+        let _ = state.recorder.lock().stop();
         *is_recording = false;
     }
 
-    // Brief settle so the WAV finalizes cleanly
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    emit_hud(app, "transcribing", "", false);
+    hud_log("[coord] transcribing");
+    // Brief settle so the WAV finalizes cleanly.
+    std::thread::sleep(std::time::Duration::from_millis(80));
 
     let settings = state.settings.lock().clone();
     let model_path = model_manager::resolved_model_path(&settings.model);
-
-    if !model_manager::is_model_downloaded(&settings.model) {
-        return Err(format!(
-            "Model '{}' not found. Open Settings → Models to download one.",
-            settings.model
-        ));
-    }
-
     let wav_path = state.temp_wav_path.clone();
-    let language = settings.language.clone();
-    let silence_threshold = settings.silence_threshold;
-    let wav_path_for_peak = wav_path.clone();
-    let text = tokio::task::spawn_blocking(move || {
-        speech::transcribe(&wav_path, &model_path, &language, silence_threshold)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
 
-    if text.is_empty() {
-        // Peak near true zero (not just quiet speech) almost always means the
-        // mic never delivered real audio — a denied Microphone permission or
-        // wrong input device, not "nothing was said". Surface that instead of
-        // a generic empty result so it's actionable.
-        let peak = tokio::task::spawn_blocking(move || speech::wav_peak_level(&wav_path_for_peak))
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or(1.0);
-        if peak < 0.001 {
-            return Err(
-                "No microphone input detected. Check System Settings → Privacy & Security → \
-                 Microphone — OpenVoice may need to be re-enabled after an app update."
-                    .into(),
-            );
+    let result = speech::transcribe(
+        &wav_path,
+        &model_path,
+        &settings.language,
+        settings.silence_threshold,
+    );
+
+    match result {
+        Ok(text) if !text.trim().is_empty() => {
+            let mut text = text.trim().to_string();
+            if settings.append_trailing_space && !text.ends_with(' ') {
+                text.push(' ');
+            }
+
+            if let Err(e) = output::deliver_text(&text, &settings.output_mode) {
+                log::warn!("[output] deliver failed: {e}");
+                let _ = output::copy_to_clipboard(text.trim());
+            }
+
+            {
+                let mut history = state.transcript_history.lock();
+                let mut id_counter = state.next_id.lock();
+                let entry = TranscriptEntry {
+                    id: *id_counter,
+                    text: text.trim().to_string(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                *id_counter += 1;
+                history.push_front(entry);
+                let limit = settings.history_limit.max(1) as usize;
+                while history.len() > limit {
+                    history.pop_back();
+                }
+            }
+            let _ = app.emit("transcript-updated", ());
+
+            let show = settings.show_transcript_in_overlay;
+            emit_hud(app, "result", text.trim(), show);
+            hud_log(&format!("[coord] result ({} chars)", text.trim().len()));
+            // Linger longer when actually showing the text; otherwise just a
+            // brief success flash before it disappears.
+            schedule_hide(app, if show { 2200 } else { 700 });
         }
-        return Ok(String::new());
-    }
-
-    let mut text = text;
-    if settings.append_trailing_space && !text.ends_with(' ') {
-        text.push(' ');
-    }
-
-    // paste / type / clipboard — paste is default (most reliable)
-    if let Err(e) = output::deliver_text(&text, &settings.output_mode) {
-        log::warn!("[output] deliver failed: {e}");
-        // Last resort: still keep text in clipboard so user can ⌘V
-        let _ = output::copy_to_clipboard(text.trim());
-    }
-
-    {
-        let mut history = state.transcript_history.lock();
-        let mut id_counter = state.next_id.lock();
-        let entry = TranscriptEntry {
-            id: *id_counter,
-            text: text.trim().to_string(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        };
-        *id_counter += 1;
-        history.push_front(entry);
-        let limit = settings.history_limit.max(1) as usize;
-        while history.len() > limit {
-            history.pop_back();
+        Ok(_) => {
+            // Empty transcript: distinguish "no mic signal at all" (denied
+            // permission / wrong device) from "quiet / nothing said".
+            let peak = speech::wav_peak_level(&wav_path).unwrap_or(1.0);
+            if peak < 0.001 {
+                emit_hud(
+                    app,
+                    "error",
+                    "No mic input — check System Settings → Privacy & Security → Microphone.",
+                    false,
+                );
+                hud_log("[coord] empty result, peak≈0 (mic permission?)");
+                schedule_hide(app, 3500);
+            } else {
+                emit_hud(app, "result", "No speech detected", false);
+                hud_log("[coord] empty result, signal present");
+                schedule_hide(app, 1500);
+            }
+        }
+        Err(e) => {
+            emit_hud(app, "error", &e, false);
+            hud_log(&format!("[coord] transcribe error: {e}"));
+            schedule_hide(app, 3500);
         }
     }
+}
 
-    let _ = app.emit("transcript-updated", ());
-    Ok(text)
+/// Spawn the coordinator thread and return its command sender.
+fn spawn_coordinator(app: AppHandle) -> std::sync::mpsc::Sender<CoordCmd> {
+    let (tx, rx) = std::sync::mpsc::channel::<CoordCmd>();
+    std::thread::Builder::new()
+        .name("recording-coordinator".into())
+        .spawn(move || {
+            let mut recording = false;
+            for cmd in rx {
+                let ptt = {
+                    let state = app.state::<AppState>();
+                    let s = state.settings.lock();
+                    s.recording_mode != "toggle"
+                };
+                match cmd {
+                    CoordCmd::Press => {
+                        if ptt {
+                            if !recording {
+                                recording = coordinator_start(&app);
+                            }
+                        } else if recording {
+                            coordinator_stop(&app);
+                            recording = false;
+                        } else {
+                            recording = coordinator_start(&app);
+                        }
+                    }
+                    CoordCmd::Release => {
+                        if ptt && recording {
+                            coordinator_stop(&app);
+                            recording = false;
+                        }
+                    }
+                }
+            }
+        })
+        .expect("failed to spawn recording-coordinator thread");
+    tx
 }
 
 #[tauri::command]
@@ -689,8 +837,10 @@ fn show_settings_window(app: AppHandle) {
 /// The frontend still owns hiding it (state transitions need a delay to show
 /// "done"/"error" before disappearing) — this only guarantees the overlay
 /// reliably *appears* the instant the shortcut fires.
-const HUD_W: f64 = 280.0;
-const HUD_H: f64 = 48.0;
+const HUD_W: f64 = 260.0;
+const HUD_H: f64 = 44.0;
+/// Taller variant used only when live preview is on, to fit the rolling text.
+const HUD_H_PREVIEW: f64 = 92.0;
 
 /// The monitor the HUD should appear on: whichever one currently has the
 /// mouse cursor, so the overlay follows the screen the user is actually
@@ -717,30 +867,51 @@ fn show_hud_window(app: &AppHandle) {
     if !show_overlay {
         return;
     }
-    let Some(win) = app.get_webview_window("hud") else {
-        return;
+    let height = if app
+        .try_state::<AppState>()
+        .map(|s| s.settings.lock().live_preview)
+        .unwrap_or(false)
+    {
+        HUD_H_PREVIEW
+    } else {
+        HUD_H
     };
-    // Reset to default size in case a previous session left it grown for a
-    // live-preview line — the frontend also does this, but resetting here
-    // too avoids a one-frame flash at the wrong size before it catches up.
-    let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
-        width: HUD_W,
-        height: HUD_H,
-    }));
-    let monitor = active_monitor(&win).or_else(|| win.primary_monitor().ok().flatten());
-    if let Some(monitor) = monitor {
-        let scale = monitor.scale_factor();
-        let mon_pos = monitor.position();
-        let mon_size = monitor.size();
-        let screen_x = mon_pos.x as f64 / scale;
-        let screen_y = mon_pos.y as f64 / scale;
-        let screen_w = mon_size.width as f64 / scale;
-        let screen_h = mon_size.height as f64 / scale;
-        let x = (screen_x + (screen_w - HUD_W) / 2.0).round();
-        let y = (screen_y + screen_h - 130.0).round();
-        let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
-    }
-    let _ = win.show();
+    // Window geometry/visibility must be touched on the main thread on macOS —
+    // the coordinator calls this from a background thread.
+    let app_for_closure = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(win) = app_for_closure.get_webview_window("hud") else {
+            return;
+        };
+        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: HUD_W,
+            height,
+        }));
+        let monitor = active_monitor(&win).or_else(|| win.primary_monitor().ok().flatten());
+        if let Some(monitor) = monitor {
+            let scale = monitor.scale_factor();
+            let mon_pos = monitor.position();
+            let mon_size = monitor.size();
+            let screen_x = mon_pos.x as f64 / scale;
+            let screen_y = mon_pos.y as f64 / scale;
+            let screen_w = mon_size.width as f64 / scale;
+            let screen_h = mon_size.height as f64 / scale;
+            let x = (screen_x + (screen_w - HUD_W) / 2.0).round();
+            let y = (screen_y + screen_h - 130.0).round();
+            let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+        }
+        let _ = win.show();
+    });
+}
+
+/// Hide the HUD window on the main thread (safe to call from any thread).
+fn hide_hud_window(app: &AppHandle) {
+    let app_for_closure = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(win) = app_for_closure.get_webview_window("hud") {
+            let _ = win.hide();
+        }
+    });
 }
 
 /// Fully quit so Accessibility grants apply on next launch.
@@ -765,15 +936,19 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| match event.state() {
-                    ShortcutState::Pressed => {
-                        log::info!("[shortcut] Pressed");
-                        show_hud_window(app);
-                        let _ = app.emit("shortcut-pressed", ());
-                    }
-                    ShortcutState::Released => {
-                        log::info!("[shortcut] Released");
-                        let _ = app.emit("shortcut-released", ());
+                .with_handler(|app, _shortcut, event| {
+                    let cmd = match event.state() {
+                        ShortcutState::Pressed => {
+                            hud_log("[shortcut] Pressed");
+                            CoordCmd::Press
+                        }
+                        ShortcutState::Released => {
+                            hud_log("[shortcut] Released");
+                            CoordCmd::Release
+                        }
+                    };
+                    if let Some(tx) = app.state::<AppState>().coord_tx.lock().as_ref() {
+                        let _ = tx.send(cmd);
                     }
                 })
                 .build(),
@@ -793,6 +968,11 @@ pub fn run() {
     builder
         .manage(app_state)
         .setup(move |app| {
+            // Spawn the recording-lifecycle coordinator and hand its sender to
+            // the shared state so the shortcut handler can reach it.
+            let coord_tx = spawn_coordinator(app.handle().clone());
+            *app.state::<AppState>().coord_tx.lock() = Some(coord_tx);
+
             // Regular (not Accessory) by default: shows in Dock and makes
             // Accessibility grants attach reliably. Agent-only apps often never
             // appear as "trusted". Accessory only when the user explicitly opts
@@ -877,8 +1057,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            start_recording,
-            stop_recording_and_transcribe,
             get_audio_level,
             get_partial_transcript,
             get_history,

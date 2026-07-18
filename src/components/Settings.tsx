@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   checkAccessibilityPermission,
   requestAccessibilityPermission,
+  checkMicrophonePermission,
   requestMicrophonePermission,
 } from "tauri-plugin-macos-permissions-api";
 import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -47,6 +48,7 @@ interface AppSettings {
   theme?: string;
   hide_dock_icon?: boolean;
   live_preview?: boolean;
+  show_transcript_in_overlay?: boolean;
 }
 
 const LANGUAGES: [string, string][] = [
@@ -314,6 +316,15 @@ export default function Settings() {
     } catch {
       /* keep backend value */
     }
+    try {
+      // Real TCC permission — the backend's `microphone` flag only reflects
+      // whether a mic *device* exists, not whether we're allowed to use it,
+      // so a denied mic reads as "ready" and recording silently captures
+      // silence. Override with the actual permission state.
+      p.microphone = await checkMicrophonePermission();
+    } catch {
+      /* keep backend value */
+    }
     setModels(m);
     setSettings({
       append_trailing_space: true,
@@ -327,6 +338,7 @@ export default function Settings() {
       theme: "system",
       hide_dock_icon: false,
       live_preview: false,
+      show_transcript_in_overlay: false,
       ...s,
     });
     setPerms(p);
@@ -355,12 +367,33 @@ export default function Settings() {
           } catch {
             /* ignore */
           }
+          try {
+            p.microphone = await checkMicrophonePermission();
+          } catch {
+            /* ignore */
+          }
           setPerms(p);
         })
         .catch(() => {});
     }, 1500);
     return () => clearInterval(id);
   }, [refresh]);
+
+  // Proactively trigger the macOS microphone prompt on first launch if it
+  // hasn't been granted — otherwise the app records silence with no signal
+  // and the user has no idea permission is the problem.
+  const micRequestedRef = useRef(false);
+  useEffect(() => {
+    if (micRequestedRef.current) return;
+    checkMicrophonePermission()
+      .then((granted) => {
+        if (!granted) {
+          micRequestedRef.current = true;
+          requestMicrophonePermission().catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1002,6 +1035,23 @@ export default function Settings() {
                   <p className="s-card__desc" style={{ marginBottom: 0 }}>
                     Gradually show a rough transcript in the overlay as you speak, instead of
                     only after you stop. Uses extra CPU/GPU during recording.
+                  </p>
+                </div>
+              </label>
+
+              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={!!settings.show_transcript_in_overlay}
+                  onChange={(e) =>
+                    setSettings({ ...settings, show_transcript_in_overlay: e.target.checked })
+                  }
+                />
+                <div>
+                  <div className="s-card__title">Show transcript in overlay</div>
+                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                    After transcribing, briefly echo the finished text in the overlay before it
+                    hides. Off by default — the text is already inserted where you're typing.
                   </p>
                 </div>
               </label>
