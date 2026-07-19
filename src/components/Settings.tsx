@@ -702,8 +702,8 @@ export default function Settings() {
             <header className="s-main__header">
               <h1 className="s-main__title">Models</h1>
               <p className="s-main__desc">
-                {catalogTotal} models, all runnable — ranked by speed + accuracy. Whisper,
-                Parakeet, Canary, Moonshine, SenseVoice, GigaAM, and more.
+                {catalogTotal} on-device models, ranked by speed and accuracy — Whisper,
+                Parakeet, Moonshine, SenseVoice, and more.
               </p>
             </header>
             <div className="s-main__body">
@@ -941,9 +941,14 @@ export default function Settings() {
                 <span className="s-count">{history.length} items</span>
               </div>
               {history.length === 0 && (
-                <div className="s-card">
-                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
-                    No transcripts yet. Hold your shortcut and speak.
+                <div className="s-empty">
+                  <div className="s-empty__icon">
+                    <Logo size={30} />
+                  </div>
+                  <div className="s-empty__title">No transcripts yet</div>
+                  <p className="s-empty__desc">
+                    Hold {hotkeyLabel(settings.hotkey)} and speak — your transcripts will appear
+                    here.
                   </p>
                 </div>
               )}
@@ -983,9 +988,11 @@ export default function Settings() {
           <>
             <header className="s-main__header">
               <h1 className="s-main__title">Advanced</h1>
-              <p className="s-main__desc">Behaviour tweaks similar to Handy’s advanced panel.</p>
+              <p className="s-main__desc">Fine-tune transcription, overlay, and system behaviour.</p>
             </header>
             <div className="s-main__body">
+              <div className="s-section-label">Transcription</div>
+
               <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <input
                   type="checkbox"
@@ -1005,34 +1012,6 @@ export default function Settings() {
               <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <input
                   type="checkbox"
-                  checked={!!settings.show_overlay}
-                  onChange={(e) => setSettings({ ...settings, show_overlay: e.target.checked })}
-                />
-                <div>
-                  <div className="s-card__title">Show recording overlay</div>
-                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
-                    Floating HUD while recording / transcribing.
-                  </p>
-                </div>
-              </label>
-
-              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                <input
-                  type="checkbox"
-                  checked={!!settings.start_hidden}
-                  onChange={(e) => setSettings({ ...settings, start_hidden: e.target.checked })}
-                />
-                <div>
-                  <div className="s-card__title">Start hidden</div>
-                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
-                    Don’t open Settings on launch (tray only).
-                  </p>
-                </div>
-              </label>
-
-              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                <input
-                  type="checkbox"
                   checked={!!settings.audio_feedback}
                   onChange={(e) => setSettings({ ...settings, audio_feedback: e.target.checked })}
                 />
@@ -1044,16 +1023,36 @@ export default function Settings() {
                 </div>
               </label>
 
+              <div className="s-field">
+                <label className="s-label">Mic sensitivity</label>
+                <input
+                  className="s-input"
+                  type="range"
+                  min={0.001}
+                  max={0.03}
+                  step={0.001}
+                  value={settings.silence_threshold ?? 0.005}
+                  onChange={(e) =>
+                    setSettings({ ...settings, silence_threshold: Number(e.target.value) })
+                  }
+                />
+                <p className="s-help">
+                  Lower = picks up quieter speech (may also catch background noise).
+                </p>
+              </div>
+
+              <div className="s-section-label">Overlay</div>
+
               <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <input
                   type="checkbox"
-                  checked={launchAtLogin}
-                  onChange={(e) => toggleLaunchAtLogin(e.target.checked)}
+                  checked={!!settings.show_overlay}
+                  onChange={(e) => setSettings({ ...settings, show_overlay: e.target.checked })}
                 />
                 <div>
-                  <div className="s-card__title">Launch at login</div>
+                  <div className="s-card__title">Show recording overlay</div>
                   <p className="s-card__desc" style={{ marginBottom: 0 }}>
-                    Start OpenVoice automatically when you log in.
+                    Floating pill while recording and transcribing.
                   </p>
                 </div>
               </label>
@@ -1090,6 +1089,36 @@ export default function Settings() {
                 </div>
               </label>
 
+              <div className="s-section-label">System</div>
+
+              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={launchAtLogin}
+                  onChange={(e) => toggleLaunchAtLogin(e.target.checked)}
+                />
+                <div>
+                  <div className="s-card__title">Launch at login</div>
+                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                    Start OpenVoice automatically when you log in.
+                  </p>
+                </div>
+              </label>
+
+              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={!!settings.start_hidden}
+                  onChange={(e) => setSettings({ ...settings, start_hidden: e.target.checked })}
+                />
+                <div>
+                  <div className="s-card__title">Start hidden</div>
+                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                    Don’t open Settings on launch (tray only).
+                  </p>
+                </div>
+              </label>
+
               <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
                 <input
                   type="checkbox"
@@ -1104,6 +1133,23 @@ export default function Settings() {
                   </p>
                 </div>
               </label>
+
+              <div className="s-section-label">Appearance</div>
+
+              <div className="s-field">
+                <label className="s-label">Theme</label>
+                <select
+                  className="s-select"
+                  value={settings.theme ?? "system"}
+                  onChange={(e) => setSettings({ ...settings, theme: e.target.value })}
+                >
+                  <option value="system">Match system</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+
+              <div className="s-section-label">Data</div>
 
               <div className="s-field">
                 <label className="s-label">History limit</label>
@@ -1120,37 +1166,6 @@ export default function Settings() {
                     })
                   }
                 />
-              </div>
-
-              <div className="s-field">
-                <label className="s-label">Mic sensitivity</label>
-                <input
-                  className="s-input"
-                  type="range"
-                  min={0.001}
-                  max={0.03}
-                  step={0.001}
-                  value={settings.silence_threshold ?? 0.005}
-                  onChange={(e) =>
-                    setSettings({ ...settings, silence_threshold: Number(e.target.value) })
-                  }
-                />
-                <p className="s-help">
-                  Lower = picks up quieter speech (may also catch background noise).
-                </p>
-              </div>
-
-              <div className="s-field">
-                <label className="s-label">Theme</label>
-                <select
-                  className="s-select"
-                  value={settings.theme ?? "system"}
-                  onChange={(e) => setSettings({ ...settings, theme: e.target.value })}
-                >
-                  <option value="system">Match system</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
-                </select>
               </div>
 
               <div className="s-field">
@@ -1183,27 +1198,31 @@ export default function Settings() {
           <>
             <header className="s-main__header">
               <h1 className="s-main__title">About</h1>
-              <p className="s-main__desc">OpenVoice — local-first voice typing for macOS.</p>
             </header>
             <div className="s-main__body">
-              <div className="s-card">
-                <div className="s-card__title">Version 0.1.0</div>
-                <p className="s-card__desc">
-                  Privacy-first speech-to-text. Audio stays on your Mac. Models: Whisper (runnable)
-                  + Handy catalog for browse/download.
+              <div className="s-about">
+                <div className="s-about__mark">
+                  <Logo size={44} />
+                </div>
+                <div className="s-about__name">OpenVoice</div>
+                <div className="s-about__version">Version 0.1.0</div>
+                <p className="s-about__tag">
+                  Local-first voice typing for macOS. Your audio never leaves this Mac —
+                  transcription runs entirely on-device.
                 </p>
-                <div className="s-meta">
-                  <span className="s-pill">{models.length} models listed</span>
-                  <span className="s-pill">
-                    {models.filter((m) => m.runnable).length} ready to use
-                  </span>
+                <div className="s-meta" style={{ justifyContent: "center", marginBottom: 0 }}>
+                  <span className="s-pill">{models.length} models</span>
                   <span className="s-pill">
                     {models.filter((m) => m.downloaded).length} downloaded
                   </span>
+                  <span className="s-pill">100% offline</span>
                 </div>
               </div>
               <div className="s-card">
                 <div className="s-card__title">Data location</div>
+                <p className="s-card__desc">
+                  Models, settings, and history are stored locally in your Library folder.
+                </p>
                 <div className="s-path">
                   ~/Library/Application Support/com.openvoice.app/
                 </div>
@@ -1215,14 +1234,6 @@ export default function Settings() {
                     Open models folder
                   </button>
                 </div>
-              </div>
-              <div className="s-card">
-                <div className="s-card__title">Disk note</div>
-                <p className="s-card__desc" style={{ marginBottom: 0 }}>
-                  `npm run tauri build` creates multi‑GB Rust artifacts under{" "}
-                  <span className="s-code">src-tauri/target</span>. Run{" "}
-                  <span className="s-code">npm run clean</span> to reclaim space (keeps your source).
-                </p>
               </div>
             </div>
           </>
@@ -1474,6 +1485,8 @@ function NavIcon({ id }: { id: Tab }) {
   }
 }
 
+/** Attention-only status chips: native macOS apps surface problems, not
+ *  confirmations. Renders nothing when everything is fine. */
 function StatusStrip({
   perms,
   settings,
@@ -1481,21 +1494,19 @@ function StatusStrip({
   perms: PermissionsStatus;
   settings: AppSettings;
 }) {
+  const issues: { label: string; kind: "bad" | "warn" }[] = [];
+  if (!perms.model_ready) issues.push({ label: "Download a model to start", kind: "bad" });
+  if (!perms.microphone) issues.push({ label: "Microphone access needed", kind: "warn" });
+  if (!perms.accessibility && settings.output_mode !== "clipboard")
+    issues.push({ label: "Accessibility needed to insert text", kind: "warn" });
+  if (issues.length === 0) return null;
   return (
     <div className="s-status">
-      <span className={`s-chip ${perms.model_ready ? "s-chip--ok" : "s-chip--bad"}`}>
-        {perms.model_ready ? "Model ready" : "Need a model"}
-      </span>
-      <span className={`s-chip ${perms.microphone ? "s-chip--ok" : "s-chip--warn"}`}>
-        {perms.microphone ? "Mic OK" : "Mic missing"}
-      </span>
-      <span className={`s-chip ${perms.accessibility ? "s-chip--ok" : "s-chip--warn"}`}>
-        {perms.accessibility
-          ? "Accessibility on"
-          : settings.output_mode === "type"
-            ? "Accessibility off"
-            : "Accessibility optional"}
-      </span>
+      {issues.map((i) => (
+        <span key={i.label} className={`s-chip s-chip--${i.kind}`}>
+          {i.label}
+        </span>
+      ))}
     </div>
   );
 }
@@ -1536,17 +1547,16 @@ function ModelCard({
     >
       <div className="s-card__top">
         <div className="s-card__title">
-          {model.rank <= 10 && <span className="s-badge" style={{ marginRight: 6 }}>#{model.rank}</span>}
+          {model.rank <= 10 && <span className="s-rank">#{model.rank}</span>}
           {model.displayName}
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          {model.recommended && <span className="s-badge s-badge--accent">Recommended</span>}
-          {active && model.runnable && <span className="s-badge s-badge--on">Active</span>}
-          {model.runnable ? (
-            <span className="s-badge">Runnable</span>
+          {active && model.runnable ? (
+            <span className="s-badge s-badge--on">Active</span>
           ) : (
-            <span className="s-badge">Catalog</span>
+            model.recommended && <span className="s-badge s-badge--accent">Recommended</span>
           )}
+          {!model.runnable && <span className="s-badge">Unavailable</span>}
         </div>
       </div>
       <p className="s-card__desc">{model.description}</p>
@@ -1560,7 +1570,7 @@ function ModelCard({
       <div className="s-card__actions" onClick={(e) => e.stopPropagation()}>
         {model.downloaded && model.runnable ? (
           <>
-            <span className="s-ready">Ready{active ? " · in use" : " · click to use"}</span>
+            <span className="s-ready">{active ? "In use" : "Click to select"}</span>
             <button className="s-btn s-btn--danger s-btn--sm" onClick={onDelete}>
               Remove
             </button>
@@ -1587,15 +1597,13 @@ function ModelCard({
               Retry
             </button>
           </>
-        ) : model.downloaded && !model.runnable ? (
-          <span className="s-ready">Downloaded (engine later)</span>
+        ) : !model.runnable ? (
+          <span className="s-help" style={{ marginBottom: 0 }}>
+            Not selectable — known engine issue with this model.
+          </span>
         ) : (
-          <button
-            className={`s-btn ${model.runnable ? "s-btn--primary" : "s-btn--ghost"}`}
-            onClick={onDownload}
-          >
+          <button className="s-btn s-btn--primary" onClick={onDownload}>
             Download {model.size}
-            {!model.runnable ? " · preview" : ""}
           </button>
         )}
       </div>
