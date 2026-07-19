@@ -21,7 +21,7 @@
   top: 0;
   left: 0;
   right: 0;
-  height: 30px;
+  height: 42px;
   z-index: 20;
 }
 
@@ -30,7 +30,7 @@
   flex-direction: column;
   gap: 1px;
   /* top inset clears the floating traffic lights */
-  padding: 36px 12px 14px;
+  padding: 44px 12px 14px;
   /* Frosted "mirror" sidebar: a light tint over the macOS vibrancy material,
      kept low so the translucent frost dominates like macOS System Settings.
      The percentage is the knob — HIGHER = more opaque / less transparent,
@@ -151,7 +151,7 @@
 }
 
 .s-main__header {
-  padding: 32px 28px 6px;
+  padding: 40px 28px 6px;
   flex-shrink: 0;
 }
 
