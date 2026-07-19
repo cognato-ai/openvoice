@@ -641,8 +641,12 @@ export default function Settings() {
 
   return (
     <div className="s-shell">
+      {/* Integrated, draggable title bar strip (macOS Overlay style — the
+          traffic lights float over this). Interactive controls below it sit
+          past the top inset so they're never covered. */}
+      <div className="s-titlebar" data-tauri-drag-region />
       <aside className="s-side">
-        <div className="s-brand">
+        <div className="s-brand" data-tauri-drag-region>
           <div className="s-brand__mark">
             <Logo size={22} />
           </div>
@@ -1603,6 +1607,7 @@ function Onboarding({
 }) {
   return (
     <div className="ob">
+      <div className="s-titlebar" data-tauri-drag-region />
       <div className="ob__inner">
         <div className="ob__mark">
           <Logo size={36} />
