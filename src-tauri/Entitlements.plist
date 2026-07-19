@@ -2,6 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Hardened-runtime entitlement for microphone access (Tauri enables the
+         hardened runtime by default). Without this, macOS auto-denies the mic
+         request with no prompt. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- App Sandbox equivalent, harmless to keep for compatibility. -->
     <key>com.apple.security.device.microphone</key>
     <true/>
 </dict>

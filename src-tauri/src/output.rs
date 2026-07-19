@@ -176,6 +176,57 @@ pub fn has_input_device() -> bool {
         .unwrap_or(false)
 }
 
+/// Ask macOS for Microphone access from the backend (AVCaptureDevice), so the
+/// app reliably registers in System Settings → Privacy → Microphone and shows
+/// the permission prompt — independent of any window being visible.
+///
+/// Why this is needed: the frontend's mic request only runs inside the Settings
+/// webview, which never executes when a model is already installed and that
+/// window stays hidden. Launched as a `.app`, the request therefore never fired,
+/// so `com.openvoice.app` never appeared in the Microphone list and never got
+/// its own grant (running the raw binary "worked" only because it inherited the
+/// terminal's mic permission). Requesting here guarantees it happens on launch.
+///
+/// Safe to call every launch: if access is already authorized it's a no-op
+/// (no prompt); it only prompts when the status is undetermined.
+/// Requests Microphone access from the backend (AVCaptureDevice) so the app
+/// reliably registers in System Settings → Privacy → Microphone and shows the
+/// permission prompt on first launch — independent of any window being visible
+/// (the frontend request only runs in the Settings webview, which never
+/// executes when a model is already installed and that window stays hidden).
+///
+/// IMPORTANT: this only works because the app carries the
+/// `com.apple.security.device.audio-input` entitlement. Under the hardened
+/// runtime (Tauri enables it), without that entitlement macOS auto-denies the
+/// request with no prompt. Safe to call every launch — it's a no-op once
+/// authorized.
+#[cfg(target_os = "macos")]
+pub fn request_microphone_access() {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    unsafe {
+        // AVMediaTypeAudio is the four-char code "soun".
+        let media_type = NSString::from_str("soun");
+        // 0=notDetermined 1=restricted 2=denied 3=authorized
+        let status: i32 =
+            msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: &*media_type];
+        if status != 3 {
+            // requestAccessForMediaType needs a non-nil completion block to
+            // present the prompt — a heap (RcBlock) one so it outlives this
+            // call until AVFoundation invokes it asynchronously.
+            let handler = RcBlock::new(|_granted: Bool| {});
+            let _: () = msg_send![
+                class!(AVCaptureDevice),
+                requestAccessForMediaType: &*media_type,
+                completionHandler: &*handler
+            ];
+        }
+    }
+}
+
 /// List available microphone names.
 pub fn list_input_devices() -> Vec<String> {
     use cpal::traits::{DeviceTrait, HostTrait};

@@ -1017,6 +1017,20 @@ pub fn run() {
             let coord_tx = spawn_coordinator(app.handle().clone());
             *app.state::<AppState>().coord_tx.lock() = Some(coord_tx);
 
+            // Request Microphone access from the backend so the app reliably
+            // registers in System Settings and prompts on first launch, no
+            // matter which window is (or isn't) visible. Done on a short delay,
+            // on the main thread, so the app is fully active (a prompt requested
+            // during setup, before the run loop is up, may never display).
+            #[cfg(target_os = "macos")]
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                    let _ = h.run_on_main_thread(output::request_microphone_access);
+                });
+            }
+
             // Regular (not Accessory) by default: shows in Dock and makes
             // Accessibility grants attach reliably. Agent-only apps often never
             // appear as "trusted". Accessory only when the user explicitly opts

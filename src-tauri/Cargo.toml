@@ -22,6 +22,11 @@ tauri-plugin-autostart        = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-plugin-macos-permissions = "2"
 macos-accessibility-client = "0.0.1"
+# For requesting Microphone access directly from the backend (AVCaptureDevice),
+# so the app reliably registers/prompts regardless of window state.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"
 
 # GGUF/GGML multi-architecture ASR engine (the same crate Handy ships) — runs
 # every model in resources/catalog.json (Whisper, Parakeet, Canary, Moonshine,

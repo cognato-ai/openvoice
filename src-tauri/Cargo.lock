@@ -3392,6 +3392,7 @@ name = "openvoice"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "block2 0.6.2",
  "cpal",
  "enigo",
  "env_logger",
@@ -3399,6 +3400,8 @@ dependencies = [
  "hound",
  "log",
  "macos-accessibility-client",
+ "objc2 0.6.4",
+ "objc2-foundation",
  "ort",
  "parakeet-rs",
  "parking_lot",
