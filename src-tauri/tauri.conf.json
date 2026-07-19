@@ -29,14 +29,19 @@
       {
         "label": "settings",
         "title": "OpenVoice",
-        "width": 720,
+        "width": 740,
         "height": 560,
-        "minWidth": 640,
+        "minWidth": 660,
         "minHeight": 480,
         "decorations": true,
+        "transparent": true,
         "visible": false,
         "resizable": true,
-        "center": true
+        "center": true,
+        "windowEffects": {
+          "effects": ["sidebar"],
+          "state": "followsWindowActiveState"
+        }
       }
     ],
     "security": {
