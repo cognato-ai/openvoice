@@ -658,20 +658,20 @@ export default function Settings() {
 
         {(
           [
-            ["models", "Models", "#0a84ff"],
-            ["general", "General", "#8e8e93"],
-            ["history", "History", "#ff9f0a"],
-            ["advanced", "Advanced", "#af52de"],
-            ["permissions", "Permissions", "#30d158"],
-            ["about", "About", "#0a84ff"],
+            ["models", "Models"],
+            ["general", "General"],
+            ["history", "History"],
+            ["advanced", "Advanced"],
+            ["permissions", "Permissions"],
+            ["about", "About"],
           ] as const
-        ).map(([id, label, color]) => (
+        ).map(([id, label]) => (
           <button
             key={id}
             className={`s-nav-btn ${tab === id ? "s-nav-btn--active" : ""}`}
             onClick={() => setTab(id)}
           >
-            <span className="s-nav-ic" style={{ background: color }}>
+            <span className="s-nav-ic">
               <NavIcon id={id} />
             </span>
             <span className="s-nav-label">{label}</span>
@@ -1398,12 +1398,12 @@ export default function Settings() {
 
 function NavIcon({ id }: { id: Tab }) {
   const common = {
-    width: 13,
-    height: 13,
+    width: 17,
+    height: 17,
     viewBox: "0 0 24 24",
     fill: "none",
     stroke: "currentColor",
-    strokeWidth: 2.2,
+    strokeWidth: 1.9,
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
   };

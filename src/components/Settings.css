@@ -31,11 +31,11 @@
   gap: 1px;
   /* top inset clears the floating traffic lights */
   padding: 36px 12px 14px;
-  /* Frosted "mirror" sidebar: a semi-opaque tint sits over the macOS vibrancy
-     material. The percentage below controls how see-through it is — HIGHER =
-     more opaque / less transparent, LOWER (toward 0%) = more of the frosted
-     background shows through. */
-  background: color-mix(in srgb, var(--bg-side) 68%, transparent);
+  /* Frosted "mirror" sidebar: a light tint over the macOS vibrancy material,
+     kept low so the translucent frost dominates like macOS System Settings.
+     The percentage is the knob — HIGHER = more opaque / less transparent,
+     LOWER (toward 0%) = more see-through frost. */
+  background: color-mix(in srgb, var(--bg-side) 22%, transparent);
   min-height: 0;
   overflow: hidden;
 }
@@ -49,15 +49,13 @@
 }
 
 .s-brand__mark {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: #fff;
+  width: 30px;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.25), 0 1px 2px rgba(0, 0, 0, 0.14);
+  /* Bare mark, no colored plate — matches the outline nav glyphs. */
+  color: var(--accent);
 }
 
 .s-brand__name {
@@ -89,12 +87,17 @@
   flex-shrink: 0;
   width: 22px;
   height: 22px;
-  border-radius: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
+  /* Monochrome outline glyph — no colored tile. */
+  color: var(--text-secondary);
+}
+.s-nav-btn:hover .s-nav-ic {
+  color: var(--text);
+}
+.s-nav-btn--active .s-nav-ic {
   color: #fff;
-  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.25), 0 0.5px 1.5px rgba(0, 0, 0, 0.12);
 }
 
 .s-nav-label {
