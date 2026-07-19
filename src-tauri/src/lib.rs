@@ -125,7 +125,7 @@ impl Default for AppSettings {
 fn load_settings() -> AppSettings {
     let path = model_manager::settings_path();
     match std::fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Ok(raw) => sanitize_settings(serde_json::from_str(&raw).unwrap_or_default()),
         Err(_) => AppSettings::default(),
     }
 }
@@ -209,6 +209,22 @@ fn hud_log(msg: &str) {
     use std::io::Write;
     log::info!("{msg}");
     let path = model_manager::app_data_dir().join("openvoice.log");
+    // Cap the log so it can never grow unbounded: past ~512 KB, keep only the
+    // newest half. Cheap enough to check on every write.
+    const MAX_LOG_BYTES: u64 = 512 * 1024;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_LOG_BYTES {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                let keep_from = raw.len() / 2;
+                // Cut at a line boundary so the file stays parseable.
+                let start = raw[keep_from..]
+                    .find('\n')
+                    .map(|i| keep_from + i + 1)
+                    .unwrap_or(keep_from);
+                let _ = std::fs::write(&path, &raw[start..]);
+            }
+        }
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -283,6 +299,9 @@ fn coordinator_start(app: &AppHandle) -> bool {
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     show_hud_window(app);
     emit_hud(app, "recording", "", false);
+    if settings.audio_feedback {
+        output::play_feedback_sound("start");
+    }
     hud_log("[coord] recording started");
     true
 }
@@ -302,6 +321,9 @@ fn coordinator_stop(app: &AppHandle) {
         *is_recording = false;
     }
 
+    if state.settings.lock().audio_feedback {
+        output::play_feedback_sound("stop");
+    }
     emit_hud(app, "transcribing", "", false);
     hud_log("[coord] transcribing");
     // Brief settle so the WAV finalizes cleanly.
@@ -801,11 +823,44 @@ fn is_shortcut_available(app: AppHandle, state: State<'_, AppState>, accel: Stri
     }
 }
 
+/// Copy arbitrary text to the clipboard via the backend (arboard) — reliable
+/// in the Tauri webview where `navigator.clipboard` may silently fail.
+#[tauri::command]
+fn copy_text(text: String) -> Result<(), String> {
+    output::copy_to_clipboard(&text)
+}
+
 #[tauri::command]
 fn export_settings_to(state: State<'_, AppState>, path: String) -> Result<(), String> {
     let settings = state.settings.lock().clone();
     let raw = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(path, raw).map_err(|e| e.to_string())
+}
+
+/// Clamp/normalize settings coming from an untrusted source (an imported
+/// JSON file). Typed deserialization already rejects wrong shapes; this
+/// closes the remaining gap of syntactically-valid but nonsensical values
+/// (a 10 GB history limit, an enum-ish string outside its known set, a
+/// threshold that silently disables the silence gate).
+fn sanitize_settings(mut s: AppSettings) -> AppSettings {
+    if !["paste", "type", "clipboard"].contains(&s.output_mode.as_str()) {
+        s.output_mode = "paste".into();
+    }
+    if !["ptt", "toggle"].contains(&s.recording_mode.as_str()) {
+        s.recording_mode = "ptt".into();
+    }
+    if !["system", "light", "dark"].contains(&s.theme.as_str()) {
+        s.theme = "system".into();
+    }
+    s.history_limit = s.history_limit.clamp(1, 500);
+    if !s.silence_threshold.is_finite() {
+        s.silence_threshold = default_silence_threshold();
+    }
+    s.silence_threshold = s.silence_threshold.clamp(0.0, 0.1);
+    if s.hotkey.trim().is_empty() {
+        s.hotkey = "Alt+Space".into();
+    }
+    s
 }
 
 #[tauri::command]
@@ -816,6 +871,7 @@ fn import_settings_from(
 ) -> Result<AppSettings, String> {
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let settings: AppSettings = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let settings = sanitize_settings(settings);
     save_settings(app, state, settings.clone())?;
     Ok(settings)
 }
@@ -1165,6 +1221,7 @@ pub fn run() {
             open_microphone_settings,
             reveal_executable,
             copy_executable_path,
+            copy_text,
             quit_app,
             get_models,
             download_model,

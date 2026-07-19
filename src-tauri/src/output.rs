@@ -168,6 +168,26 @@ pub fn open_microphone_settings() -> Result<(), String> {
     }
 }
 
+/// Play a short system sound for recording feedback ("start" or "stop").
+/// Spawned (never waited on) so it can't delay the recording path; uses the
+/// stock macOS sounds so there's nothing to bundle.
+pub fn play_feedback_sound(kind: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let file = match kind {
+            "start" => "/System/Library/Sounds/Tink.aiff",
+            _ => "/System/Library/Sounds/Pop.aiff",
+        };
+        let _ = std::process::Command::new("/usr/bin/afplay")
+            .arg(file)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = kind;
+}
+
 pub fn has_input_device() -> bool {
     use cpal::traits::{DeviceTrait, HostTrait};
     cpal::default_host()

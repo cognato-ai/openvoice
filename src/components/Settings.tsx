@@ -117,6 +117,15 @@ function formatBytes(b: number) {
   return `${(b / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+/** "2m ago"-style relative time from a unix-seconds timestamp. */
+function relativeTime(unixSecs: number) {
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSecs);
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return new Date(unixSecs * 1000).toLocaleDateString();
+}
+
 function hotkeyLabel(hotkey: string) {
   return hotkey
     .replace(/CommandOrControl/g, "⌘")
@@ -258,6 +267,7 @@ export default function Settings() {
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [importError, setImportError] = useState("");
+  const [copiedId, setCopiedId] = useState<number | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -945,18 +955,23 @@ export default function Settings() {
                     </div>
                     <button
                       className="s-btn s-btn--ghost s-btn--sm"
-                      onClick={() => invoke("copy_executable_path").catch(() => {})}
-                      // copy transcript
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        navigator.clipboard?.writeText(h.text);
+                      onClick={() => {
+                        invoke("copy_text", { text: h.text })
+                          .then(() => {
+                            setCopiedId(h.id);
+                            setTimeout(() => setCopiedId((cur) => (cur === h.id ? null : cur)), 1500);
+                          })
+                          .catch(() => {});
                       }}
                     >
-                      Copy
+                      {copiedId === h.id ? "Copied ✓" : "Copy"}
                     </button>
                   </div>
-                  <p className="s-help">
-                    {new Date(h.timestamp * 1000).toLocaleString()}
+                  <p
+                    className="s-help"
+                    title={new Date(h.timestamp * 1000).toLocaleString()}
+                  >
+                    {relativeTime(h.timestamp)}
                   </p>
                 </div>
               ))}
@@ -1024,7 +1039,7 @@ export default function Settings() {
                 <div>
                   <div className="s-card__title">Audio feedback</div>
                   <p className="s-card__desc" style={{ marginBottom: 0 }}>
-                    Play a sound when recording starts/stops (coming soon if enabled).
+                    Play a soft system sound when recording starts and stops.
                   </p>
                 </div>
               </label>
