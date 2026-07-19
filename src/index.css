@@ -1,25 +1,25 @@
 /* OpenVoice — light mirror UI inspired by Handy (clean surfaces + soft accent) */
 
 :root {
-  --bg: #fbfbfb;
-  --bg-side: #f3f3f4;
+  --bg: #f5f5f7;
+  --bg-side: #ececef;
   --bg-card: #ffffff;
-  --bg-hover: #f7f7f8;
-  --bg-inset: #f5f5f6;
+  --bg-hover: #fafafb;
+  --bg-inset: #f0f0f2;
 
-  --border: rgba(15, 15, 15, 0.08);
-  --border-strong: rgba(15, 15, 15, 0.14);
+  --border: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.13);
 
-  --text: #0f0f0f;
-  --text-secondary: #5c5c5c;
-  --text-muted: #8a8a8a;
+  --text: #1d1d1f;
+  --text-secondary: #56565a;
+  --text-muted: #8a8a8e;
 
   /* Handy-adjacent soft accent */
-  --accent: #e86ba8;
-  --accent-strong: #d94f93;
-  --accent-soft: rgba(232, 107, 168, 0.12);
-  --accent-ring: rgba(232, 107, 168, 0.35);
-  --accent-text: #b83275;
+  --accent: #007aff;
+  --accent-strong: #0060df;
+  --accent-soft: rgba(0, 122, 255, 0.1);
+  --accent-ring: rgba(0, 122, 255, 0.4);
+  --accent-text: #0067d6;
 
   --ink: #0f0f0f;
   --ink-contrast: #ffffff;
@@ -45,27 +45,27 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1c1b1a;
-    --bg-side: #161514;
-    --bg-card: #242322;
-    --bg-hover: #2a2927;
-    --bg-inset: #1a1918;
+    --bg: #1e1e20;
+    --bg-side: #171719;
+    --bg-card: #2c2c2e;
+    --bg-hover: #333336;
+    --bg-inset: #232325;
 
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.14);
+    --border: rgba(255, 255, 255, 0.09);
+    --border-strong: rgba(255, 255, 255, 0.16);
 
-    --text: #fbfbfb;
-    --text-secondary: #b0b0b0;
-    --text-muted: #7a7a7a;
+    --text: #f5f5f7;
+    --text-secondary: #aeaeb2;
+    --text-muted: #78787e;
 
-    --accent: #f28cbb;
-    --accent-strong: #f5a3c9;
-    --accent-soft: rgba(242, 140, 187, 0.14);
-    --accent-ring: rgba(242, 140, 187, 0.4);
-    --accent-text: #fad1ed;
+    --accent: #0a84ff;
+    --accent-strong: #409cff;
+    --accent-soft: rgba(10, 132, 255, 0.18);
+    --accent-ring: rgba(10, 132, 255, 0.5);
+    --accent-text: #6cb2ff;
 
-    --ink: #fbfbfb;
-    --ink-contrast: #1c1b1a;
+    --ink: #f5f5f7;
+    --ink-contrast: #1e1e20;
 
     --success: #3dd68c;
     --success-soft: rgba(61, 214, 140, 0.12);
@@ -80,24 +80,24 @@
    preference in both directions since these selectors have higher specificity
    than the bare `:root` inside the media query above. */
 :root[data-theme="dark"] {
-  --bg: #1c1b1a;
-  --bg-side: #161514;
-  --bg-card: #242322;
-  --bg-hover: #2a2927;
-  --bg-inset: #1a1918;
+  --bg: #1e1e20;
+  --bg-side: #171719;
+  --bg-card: #2c2c2e;
+  --bg-hover: #333336;
+  --bg-inset: #232325;
 
-  --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
 
-  --text: #fbfbfb;
-  --text-secondary: #b0b0b0;
-  --text-muted: #7a7a7a;
+  --text: #f5f5f7;
+  --text-secondary: #aeaeb2;
+  --text-muted: #78787e;
 
-  --accent: #f28cbb;
-  --accent-strong: #f5a3c9;
-  --accent-soft: rgba(242, 140, 187, 0.14);
-  --accent-ring: rgba(242, 140, 187, 0.4);
-  --accent-text: #fad1ed;
+  --accent: #0a84ff;
+  --accent-strong: #409cff;
+  --accent-soft: rgba(10, 132, 255, 0.18);
+  --accent-ring: rgba(10, 132, 255, 0.5);
+  --accent-text: #6cb2ff;
 
   --ink: #fbfbfb;
   --ink-contrast: #1c1b1a;
@@ -111,24 +111,24 @@
 }
 
 :root[data-theme="light"] {
-  --bg: #fbfbfb;
-  --bg-side: #f3f3f4;
+  --bg: #f5f5f7;
+  --bg-side: #ececef;
   --bg-card: #ffffff;
-  --bg-hover: #f7f7f8;
-  --bg-inset: #f5f5f6;
+  --bg-hover: #fafafb;
+  --bg-inset: #f0f0f2;
 
-  --border: rgba(15, 15, 15, 0.08);
-  --border-strong: rgba(15, 15, 15, 0.14);
+  --border: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.13);
 
-  --text: #0f0f0f;
-  --text-secondary: #5c5c5c;
-  --text-muted: #8a8a8a;
+  --text: #1d1d1f;
+  --text-secondary: #56565a;
+  --text-muted: #8a8a8e;
 
-  --accent: #e86ba8;
-  --accent-strong: #d94f93;
-  --accent-soft: rgba(232, 107, 168, 0.12);
-  --accent-ring: rgba(232, 107, 168, 0.35);
-  --accent-text: #b83275;
+  --accent: #007aff;
+  --accent-strong: #0060df;
+  --accent-soft: rgba(0, 122, 255, 0.1);
+  --accent-ring: rgba(0, 122, 255, 0.4);
+  --accent-text: #0067d6;
 
   --ink: #0f0f0f;
   --ink-contrast: #ffffff;

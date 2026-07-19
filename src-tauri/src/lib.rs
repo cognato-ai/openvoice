@@ -836,6 +836,36 @@ fn show_settings_window(app: AppHandle) {
     }
 }
 
+/// Show + focus the settings window, optionally telling the frontend to
+/// navigate to a specific tab first (via a `settings-navigate` event).
+fn reveal_settings(app: &AppHandle, tab: Option<&str>) {
+    if let Some(tab) = tab {
+        let _ = app.emit("settings-navigate", tab);
+    }
+    if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        let _ = win.unminimize();
+    }
+}
+
+/// Formats a Tauri accelerator string (e.g. "Alt+Space") into macOS glyphs
+/// (e.g. "⌥ Space") for menu display.
+fn format_hotkey(accel: &str) -> String {
+    accel
+        .split('+')
+        .map(|part| match part.trim() {
+            "CommandOrControl" | "CmdOrCtrl" | "Command" | "Cmd" | "Super" | "Meta" => "⌘",
+            "Control" | "Ctrl" => "⌃",
+            "Alt" | "Option" => "⌥",
+            "Shift" => "⇧",
+            "Space" => "Space",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Shows + positions the HUD overlay directly from Rust, driven by the
 /// global-shortcut handler itself rather than a frontend event round-trip.
 /// The frontend still owns hiding it (state transitions need a delay to show
@@ -1021,13 +1051,42 @@ pub fn run() {
                 });
             }
 
+            // Informational header: current dictation shortcut (disabled row).
+            let hotkey_label = {
+                let state = app.state::<AppState>();
+                let hotkey = state.settings.lock().hotkey.clone();
+                format!("Hold {} to dictate", format_hotkey(&hotkey))
+            };
+            let header_i = MenuItemBuilder::with_id("hotkey_header", hotkey_label)
+                .enabled(false)
+                .build(app)?;
+
             let open_settings_i =
                 MenuItemBuilder::with_id("open_settings", "Settings…").build(app)?;
-            let separator = PredefinedMenuItem::separator(app)?;
+            let models_i = MenuItemBuilder::with_id("open_models", "Models…").build(app)?;
+            let history_i = MenuItemBuilder::with_id("open_history", "History…").build(app)?;
+            let copy_last_i =
+                MenuItemBuilder::with_id("copy_last", "Copy Last Transcript").build(app)?;
+            let about_i = MenuItemBuilder::with_id(
+                "open_about",
+                format!("About OpenVoice {}", env!("CARGO_PKG_VERSION")),
+            )
+            .build(app)?;
             let quit_i = MenuItemBuilder::with_id("quit", "Quit OpenVoice").build(app)?;
 
             let menu = MenuBuilder::new(app)
-                .items(&[&open_settings_i, &separator, &quit_i])
+                .items(&[
+                    &header_i,
+                    &PredefinedMenuItem::separator(app)?,
+                    &open_settings_i,
+                    &models_i,
+                    &history_i,
+                    &PredefinedMenuItem::separator(app)?,
+                    &copy_last_i,
+                    &PredefinedMenuItem::separator(app)?,
+                    &about_i,
+                    &quit_i,
+                ])
                 .build()?;
 
             let mut tray = TrayIconBuilder::new()
@@ -1036,10 +1095,19 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open_settings" => {
-                        if let Some(win) = app.get_webview_window("settings") {
-                            let _ = win.show();
-                            let _ = win.set_focus();
+                    "open_settings" => reveal_settings(app, None),
+                    "open_models" => reveal_settings(app, Some("models")),
+                    "open_history" => reveal_settings(app, Some("history")),
+                    "open_about" => reveal_settings(app, Some("about")),
+                    "copy_last" => {
+                        let state = app.state::<AppState>();
+                        let last = state
+                            .transcript_history
+                            .lock()
+                            .front()
+                            .map(|e| e.text.clone());
+                        if let Some(text) = last {
+                            let _ = output::copy_to_clipboard(text.trim());
                         }
                     }
                     "quit" => app.exit(0),

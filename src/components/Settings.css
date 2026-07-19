@@ -1,6 +1,6 @@
 .s-shell {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: 210px 1fr;
   height: 100%;
   max-height: 100%;
   min-height: 0;
@@ -13,10 +13,10 @@
 .s-side {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 16px 10px;
+  gap: 1px;
+  padding: 14px 12px;
   background: var(--bg-side);
-  border-right: 1px solid var(--border);
+  border-right: 0.5px solid var(--border);
   min-height: 0;
   overflow: hidden;
 }
@@ -25,24 +25,25 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 8px 16px;
+  padding: 6px 8px 14px;
   color: var(--text);
 }
 
 .s-brand__mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  background: var(--accent-soft);
-  color: var(--accent-text);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #33aaff, #007aff);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.3), 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
 .s-brand__name {
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 650;
   letter-spacing: -0.2px;
 }
 
@@ -56,24 +57,43 @@
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 9px 11px;
-  border-radius: 10px;
+  padding: 5px 8px;
+  border-radius: 8px;
   font-size: 13px;
-  font-weight: 550;
-  color: var(--text-secondary);
-  transition: background 0.12s, color 0.12s;
+  font-weight: 500;
+  color: var(--text);
+  transition: background 0.1s;
   text-align: left;
 }
 
+.s-nav-ic {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.25), 0 0.5px 1.5px rgba(0, 0, 0, 0.12);
+}
+
+.s-nav-label {
+  flex: 1;
+  min-width: 0;
+  letter-spacing: -0.1px;
+}
+
 .s-nav-btn:hover {
-  background: color-mix(in srgb, var(--text) 5%, transparent);
-  color: var(--text);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .s-nav-btn--active {
-  background: var(--bg-card);
-  color: var(--text);
-  box-shadow: var(--shadow-sm);
+  background: var(--accent);
+  color: #fff;
+}
+.s-nav-btn--active:hover {
+  background: var(--accent);
 }
 
 .s-nav-btn .dot {
@@ -82,6 +102,9 @@
   height: 7px;
   border-radius: 50%;
   background: var(--warning);
+}
+.s-nav-btn--active .dot {
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .s-side__footer {
@@ -168,10 +191,16 @@
   flex: 1;
   min-width: 180px;
   background: var(--bg-card) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
-  padding: 10px 12px !important;
-  box-shadow: var(--shadow-sm);
+  border: 0.5px solid var(--border-strong) !important;
+  border-radius: 9px !important;
+  padding: 8px 12px !important;
+  font-size: 13px;
+  box-shadow: 0 1px 1.5px rgba(0, 0, 0, 0.04);
+}
+.s-search:focus {
+  outline: none;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .s-filter {
@@ -220,9 +249,10 @@
 
 .s-card {
   background: var(--bg-card);
-  border: 1.5px solid var(--border);
+  border: 0.5px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 14px 16px;
+  padding: 13px 15px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   transition: border-color 0.15s, box-shadow 0.15s, transform 0.12s;
 }
 
@@ -328,11 +358,12 @@
 .s-btn:active { transform: scale(0.98); }
 
 .s-btn--primary {
-  background: var(--ink);
-  color: var(--ink-contrast);
+  background: var(--accent);
+  color: #fff;
+  box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.25), 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
-.s-btn--primary:hover { opacity: 0.88; }
+.s-btn--primary:hover { background: var(--accent-strong); }
 .s-btn--primary:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .s-btn--accent {
@@ -429,16 +460,59 @@
 }
 
 .s-radio input { margin-top: 2px; accent-color: var(--accent); }
+
+/* macOS-style toggle switch (styles the boolean checkboxes in settings cards,
+   pushed to the right edge of the row like System Settings). */
+.s-card input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  order: 2;
+  margin-left: auto;
+  align-self: center;
+  flex-shrink: 0;
+  width: 38px;
+  height: 23px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 16%, transparent);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.22s ease;
+}
+.s-card input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+  transition: transform 0.22s cubic-bezier(0.3, 0.7, 0.3, 1);
+}
+.s-card input[type="checkbox"]:checked {
+  background: #30d158;
+}
+.s-card input[type="checkbox"]:checked::after {
+  transform: translateX(15px);
+}
 .s-radio__label { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
 .s-radio__desc { font-size: 12px; color: var(--text-secondary); }
 
 .s-input, .s-select {
   width: 100%;
   background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px 11px;
   font-size: 13px;
+  box-shadow: 0 1px 1.5px rgba(0, 0, 0, 0.04);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.s-input:focus, .s-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .s-footer-actions {
