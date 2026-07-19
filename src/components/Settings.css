@@ -31,8 +31,11 @@
   gap: 1px;
   /* top inset clears the floating traffic lights */
   padding: 36px 12px 14px;
-  /* translucent sidebar over the vibrancy — the frosted "mirror" look */
-  background: transparent;
+  /* Frosted "mirror" sidebar: a semi-opaque tint sits over the macOS vibrancy
+     material. The percentage below controls how see-through it is — HIGHER =
+     more opaque / less transparent, LOWER (toward 0%) = more of the frosted
+     background shows through. */
+  background: color-mix(in srgb, var(--bg-side) 68%, transparent);
   min-height: 0;
   overflow: hidden;
 }
