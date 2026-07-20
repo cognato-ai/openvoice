@@ -540,13 +540,47 @@
   border-radius: 8px;
   padding: 8px 11px;
   font-size: 13px;
+  color: var(--text);
   box-shadow: 0 1px 1.5px rgba(0, 0, 0, 0.04);
-  transition: border-color 0.12s, box-shadow 0.12s;
+  transition: border-color 0.12s, box-shadow 0.12s, background-color 0.12s;
 }
 .s-input:focus, .s-select:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Custom-styled pull-down: hides the native chrome and draws a clean chevron
+   in a subtle accent chip, macOS System Settings style. */
+.s-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 34px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23888891' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6.5l4 3.5 4-3.5'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 15px;
+}
+.s-select:hover {
+  background-color: var(--bg-hover);
+  border-color: var(--accent-ring);
+}
+/* Brighten the chevron in dark mode so it reads on the darker card. */
+@media (prefers-color-scheme: dark) {
+  .s-select {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23a0a0a8' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6.5l4 3.5 4-3.5'/></svg>");
+  }
+}
+:root[data-theme="dark"] .s-select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23a0a0a8' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6.5l4 3.5 4-3.5'/></svg>");
+}
+:root[data-theme="light"] .s-select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23888891' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6.5l4 3.5 4-3.5'/></svg>");
+}
+.s-select option {
+  background: var(--bg-card);
+  color: var(--text);
 }
 
 .s-footer-actions {
