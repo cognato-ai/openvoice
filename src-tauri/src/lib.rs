@@ -886,23 +886,116 @@ fn catalog_stats() -> serde_json::Value {
 
 #[tauri::command]
 fn show_settings_window(app: AppHandle) {
-    if let Some(win) = app.get_webview_window("settings") {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+    reveal_settings(&app, None);
 }
 
 /// Show + focus the settings window, optionally telling the frontend to
 /// navigate to a specific tab first (via a `settings-navigate` event).
+///
+/// The close button hides the window rather than destroying it (see setup).
+/// If it was still destroyed somehow, we recreate it so tray → Settings
+/// always works without quitting the app.
 fn reveal_settings(app: &AppHandle, tab: Option<&str>) {
     if let Some(tab) = tab {
         let _ = app.emit("settings-navigate", tab);
     }
+
     if let Some(win) = app.get_webview_window("settings") {
+        let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
-        let _ = win.unminimize();
+        activate_app(app);
+        return;
     }
+
+    // Window was destroyed (e.g. old builds that didn't intercept close).
+    // Rebuild so Settings remains reachable from the tray.
+    log::warn!("[window] settings window missing — recreating");
+    if let Err(e) = recreate_settings_window(app) {
+        log::error!("[window] failed to recreate settings: {e}");
+        return;
+    }
+    if let Some(tab) = tab {
+        // Frontend may need a beat to mount listeners after recreate
+        let app2 = app.clone();
+        let tab = tab.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = app2.emit("settings-navigate", tab);
+        });
+    }
+}
+
+/// Brings the app itself to the front.
+///
+/// With `hide_dock_icon` on we run as `ActivationPolicy::Accessory`, and an
+/// accessory app is never made frontmost by simply showing a window: the
+/// window can order in behind whatever the user is working in, or come up
+/// without keyboard focus. `set_focus()` alone is not enough — the process
+/// has to explicitly activate. No-op cost when the Dock icon is visible.
+fn activate_app(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.run_on_main_thread(|| unsafe {
+            use objc2::runtime::{AnyObject, Bool};
+            use objc2::{class, msg_send};
+            let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            if !ns_app.is_null() {
+                let _: () = msg_send![ns_app, activateIgnoringOtherApps: Bool::YES];
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
+/// Rebuilds the settings window. This MUST stay in sync with the `settings`
+/// entry in `tauri.conf.json` — a recreated window gets none of that config,
+/// so without these calls it would come back opaque, with a standard title
+/// bar, no vibrancy and mispositioned traffic lights.
+fn recreate_settings_window(app: &AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let builder = WebviewWindowBuilder::new(
+        app,
+        "settings",
+        WebviewUrl::App("index.html".into()),
+    )
+    .title("OpenVoice")
+    .inner_size(740.0, 560.0)
+    .min_inner_size(660.0, 480.0)
+    .resizable(true)
+    .visible(true)
+    .center()
+    .transparent(true)
+    .effects(tauri::utils::config::WindowEffectsConfig {
+        effects: vec![tauri::window::Effect::Sidebar],
+        state: Some(tauri::window::EffectState::FollowsWindowActiveState),
+        radius: None,
+        color: None,
+    });
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
+
+    let win = builder.build().map_err(|e| e.to_string())?;
+    install_settings_close_handler(&win);
+    let _ = win.set_focus();
+    Ok(())
+}
+
+/// Close (✕) must hide, not destroy — otherwise tray → Settings does nothing.
+fn install_settings_close_handler(win: &tauri::WebviewWindow) {
+    let w = win.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = w.hide();
+        }
+    });
 }
 
 /// Formats a Tauri accelerator string (e.g. "Alt+Space") into macOS glyphs
@@ -1199,11 +1292,25 @@ pub fn run() {
                     !s.onboarding_complete || !model_manager::is_model_downloaded(&s.model)
                 }
             };
+            // Intercept ✕ so the window is hidden, not destroyed. Without this,
+            // closing Settings once makes every later tray → Settings a no-op
+            // until the whole app is quit and relaunched.
+            if let Some(win) = app.get_webview_window("settings") {
+                install_settings_close_handler(&win);
+            }
+            // Same for HUD — never destroy it on accidental close paths.
+            if let Some(win) = app.get_webview_window("hud") {
+                let w = win.clone();
+                win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = w.hide();
+                    }
+                });
+            }
+
             if show_settings {
-                if let Some(win) = app.get_webview_window("settings") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                reveal_settings(app.handle(), None);
             }
 
             Ok(())
@@ -1237,6 +1344,14 @@ pub fn run() {
             export_settings_to,
             import_settings_from,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running OpenVoice");
+        .build(tauri::generate_context!())
+        .expect("error while running OpenVoice")
+        .run(|app, event| {
+            // Clicking the Dock icon when no window is visible. Since ✕ only
+            // hides the settings window, macOS sees zero visible windows and
+            // would otherwise do nothing at all here.
+            if let tauri::RunEvent::Reopen { .. } = event {
+                reveal_settings(app, None);
+            }
+        });
 }
