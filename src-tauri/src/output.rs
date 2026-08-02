@@ -247,6 +247,49 @@ pub fn request_microphone_access() {
     }
 }
 
+/// Readable name of the app currently in the foreground (e.g. "Slack", "Mail",
+/// "Visual Studio Code"), given to the enhancement model as context so it can
+/// adapt its output to that app. Returns None if it can't be determined, or if
+/// the foreground app is OpenVoice itself (nothing useful to adapt to).
+///
+/// Reads `NSWorkspace.sharedWorkspace.frontmostApplication`. MUST be called on
+/// the main thread (AppKit requirement) — callers schedule it via
+/// `run_on_main_thread`. Uses runtime class lookup (like the mic code) so no
+/// AppKit crate is needed; AppKit is already linked into the app.
+#[cfg(target_os = "macos")]
+pub fn frontmost_app_name() -> Option<String> {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let app: *mut AnyObject = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        // Skip our own app — it can be frontmost when the Settings window is open.
+        let bundle_ptr: *const NSString = msg_send![app, bundleIdentifier];
+        if !bundle_ptr.is_null() && (*bundle_ptr).to_string() == "com.openvoice.app" {
+            return None;
+        }
+        let name_ptr: *const NSString = msg_send![app, localizedName];
+        if name_ptr.is_null() {
+            return None;
+        }
+        let name = (*name_ptr).to_string();
+        (!name.trim().is_empty()).then_some(name)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn frontmost_app_name() -> Option<String> {
+    None
+}
+
 /// List available microphone names.
 pub fn list_input_devices() -> Vec<String> {
     use cpal::traits::{DeviceTrait, HostTrait};

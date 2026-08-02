@@ -28,6 +28,7 @@ interface ModelInfo {
   runnable: boolean;
   languages: string[];
   family: string;
+  kind: string; // "asr" | "llm"
   rank: number;
 }
 
@@ -49,6 +50,13 @@ interface AppSettings {
   hide_dock_icon?: boolean;
   live_preview?: boolean;
   show_transcript_in_overlay?: boolean;
+  enhance_enabled?: boolean;
+  enhance_model?: string;
+  enhance_mode?: string;
+  enhance_intensity?: string;
+  enhance_custom_prompt?: string;
+  enhance_voice_commands?: boolean;
+  enhance_debug_log?: boolean;
 }
 
 const LANGUAGES: [string, string][] = [
@@ -71,6 +79,7 @@ const LANGUAGES: [string, string][] = [
 interface TranscriptEntry {
   id: number;
   text: string;
+  raw?: string | null;
   timestamp: number;
 }
 
@@ -107,7 +116,7 @@ interface DownloadState {
   error?: string;
 }
 
-type Tab = "models" | "general" | "history" | "advanced" | "permissions" | "about";
+type Tab = "models" | "general" | "enhance" | "history" | "advanced" | "permissions" | "about";
 type ModelFilter = "all" | "runnable" | "recommended" | "downloaded";
 
 function formatBytes(b: number) {
@@ -268,6 +277,7 @@ export default function Settings() {
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [importError, setImportError] = useState("");
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [showRawId, setShowRawId] = useState<number | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -349,6 +359,13 @@ export default function Settings() {
       hide_dock_icon: false,
       live_preview: false,
       show_transcript_in_overlay: false,
+      enhance_enabled: false,
+      enhance_model: "",
+      enhance_mode: "clean",
+      enhance_intensity: "light",
+      enhance_custom_prompt: "",
+      enhance_voice_commands: false,
+      enhance_debug_log: false,
       ...s,
     });
     setPerms(p);
@@ -482,7 +499,13 @@ export default function Settings() {
       try {
         await invoke("download_model", { modelName });
         const model = models.find((m) => m.name === modelName);
-        if (settings && model?.runnable) {
+        if (settings && model?.kind === "llm") {
+          // Enhancement model: select it for enhancement, don't touch the
+          // active ASR model.
+          const next = { ...settings, enhance_model: modelName };
+          setSettings(next);
+          await invoke("save_settings", { settings: next });
+        } else if (settings && model?.runnable) {
           const next = { ...settings, model: modelName };
           setSettings(next);
           await invoke("save_settings", { settings: next });
@@ -590,8 +613,13 @@ export default function Settings() {
     refresh();
   }
 
+  // Speech (ASR) models power the Models tab; enhancement LLMs live in their
+  // own section under Advanced, so keep the two lists apart.
+  const asrModels = useMemo(() => models.filter((m) => m.kind !== "llm"), [models]);
+  const enhanceModels = useMemo(() => models.filter((m) => m.kind === "llm"), [models]);
+
   const filtered = useMemo(() => {
-    let list = models;
+    let list = asrModels;
     if (filter === "runnable") list = list.filter((m) => m.runnable);
     if (filter === "recommended") list = list.filter((m) => m.recommended);
     if (filter === "downloaded") list = list.filter((m) => m.downloaded);
@@ -610,19 +638,19 @@ export default function Settings() {
       );
     }
     return list;
-  }, [models, filter, query, showAllCatalog]);
+  }, [asrModels, filter, query, showAllCatalog]);
 
   const catalogHidden =
     filter === "all" && !showAllCatalog && !query
-      ? models.filter((m) => !m.runnable && !m.recommended).length
+      ? asrModels.filter((m) => !m.runnable && !m.recommended).length
       : 0;
 
   const displayModels = useMemo(() => {
     if (filter === "all" && !showAllCatalog && !query) {
-      return models.filter((m) => m.runnable || m.recommended);
+      return asrModels.filter((m) => m.runnable || m.recommended);
     }
     return filtered;
-  }, [filter, showAllCatalog, query, models, filtered]);
+  }, [filter, showAllCatalog, query, asrModels, filtered]);
 
   if (!settings || !perms) {
     return (
@@ -670,6 +698,7 @@ export default function Settings() {
           [
             ["models", "Models"],
             ["general", "General"],
+            ["enhance", "Enhancement"],
             ["history", "History"],
             ["advanced", "Advanced"],
             ["permissions", "Permissions"],
@@ -717,7 +746,7 @@ export default function Settings() {
                   onChange={(e) => setQuery(e.target.value)}
                 />
                 <span className="s-count">
-                  {displayModels.length} / {models.length}
+                  {displayModels.length} / {asrModels.length}
                 </span>
               </div>
 
@@ -882,14 +911,14 @@ export default function Settings() {
                   value={settings.model}
                   onChange={(e) => setSettings({ ...settings, model: e.target.value })}
                 >
-                  {models
+                  {asrModels
                     .filter((m) => m.downloaded && m.runnable)
                     .map((m) => (
                       <option key={m.name} value={m.name}>
                         {m.displayName} ({m.size})
                       </option>
                     ))}
-                  {models.filter((m) => m.downloaded && m.runnable).length === 0 && (
+                  {asrModels.filter((m) => m.downloaded && m.runnable).length === 0 && (
                     <option disabled>No runnable models downloaded</option>
                   )}
                 </select>
@@ -952,34 +981,263 @@ export default function Settings() {
                   </p>
                 </div>
               )}
-              {history.map((h) => (
-                <div key={h.id} className="s-card">
-                  <div className="s-card__top">
-                    <div className="s-card__title" style={{ fontWeight: 500, fontSize: 13 }}>
-                      {h.text || "—"}
+              {history.map((h) => {
+                const showingRaw = showRawId === h.id && !!h.raw;
+                const shown = showingRaw ? (h.raw as string) : h.text;
+                return (
+                  <div key={h.id} className="s-card">
+                    <div className="s-card__top">
+                      <div className="s-card__title" style={{ fontWeight: 500, fontSize: 13 }}>
+                        {shown || "—"}
+                      </div>
+                      <button
+                        className="s-btn s-btn--ghost s-btn--sm"
+                        onClick={() => {
+                          invoke("copy_text", { text: shown })
+                            .then(() => {
+                              setCopiedId(h.id);
+                              setTimeout(() => setCopiedId((cur) => (cur === h.id ? null : cur)), 1500);
+                            })
+                            .catch(() => {});
+                        }}
+                      >
+                        {copiedId === h.id ? "Copied ✓" : "Copy"}
+                      </button>
                     </div>
-                    <button
-                      className="s-btn s-btn--ghost s-btn--sm"
-                      onClick={() => {
-                        invoke("copy_text", { text: h.text })
-                          .then(() => {
-                            setCopiedId(h.id);
-                            setTimeout(() => setCopiedId((cur) => (cur === h.id ? null : cur)), 1500);
-                          })
-                          .catch(() => {});
-                      }}
+                    <p
+                      className="s-help"
+                      title={new Date(h.timestamp * 1000).toLocaleString()}
+                      style={{ display: "flex", gap: 10, alignItems: "center" }}
                     >
-                      {copiedId === h.id ? "Copied ✓" : "Copy"}
-                    </button>
+                      <span>{relativeTime(h.timestamp)}</span>
+                      {h.raw && (
+                        <>
+                          <span style={{ opacity: 0.4 }}>·</span>
+                          <button
+                            className="s-linkish"
+                            onClick={() => setShowRawId((cur) => (cur === h.id ? null : h.id))}
+                          >
+                            {showingRaw ? "Show enhanced" : "Show original"}
+                          </button>
+                        </>
+                      )}
+                      {showingRaw && <span style={{ opacity: 0.5 }}>original transcript</span>}
+                    </p>
                   </div>
-                  <p
-                    className="s-help"
-                    title={new Date(h.timestamp * 1000).toLocaleString()}
-                  >
-                    {relativeTime(h.timestamp)}
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {tab === "enhance" && (
+          <>
+            <header className="s-main__header">
+              <h1 className="s-main__title">Enhancement</h1>
+              <p className="s-main__desc">
+                Polish your dictation with a small on-device LLM before it's pasted.
+              </p>
+            </header>
+            <div className="s-main__body">
+              <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={!!settings.enhance_enabled}
+                  onChange={(e) => setSettings({ ...settings, enhance_enabled: e.target.checked })}
+                />
+                <div>
+                  <div className="s-card__title">Enhance transcripts with a local LLM</div>
+                  <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                    Cleans up filler words and fixes punctuation before your text is pasted. If it's
+                    ever slow or unavailable, your raw transcript is used — nothing is ever lost, and
+                    nothing leaves your Mac.
                   </p>
                 </div>
-              ))}
+              </label>
+
+              {settings.enhance_enabled && (
+                <>
+                  <div className="s-section-label">Model</div>
+                  {enhanceModels.length === 0 && (
+                    <p className="s-help">No enhancement models available in the catalog.</p>
+                  )}
+                  {enhanceModels.map((m) => {
+                    const dl = downloads[m.name];
+                    const isSelected = settings.enhance_model === m.name;
+                    return (
+                      <div className="s-card" key={m.name}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div className="s-card__title">
+                              {m.displayName}{" "}
+                              <span style={{ opacity: 0.5, fontWeight: 400 }}>· {m.size}</span>
+                            </div>
+                            <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                              {m.description}
+                            </p>
+                          </div>
+                          {m.downloaded ? (
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              {isSelected ? (
+                                <span className="s-rank" style={{ whiteSpace: "nowrap" }}>
+                                  In use
+                                </span>
+                              ) : (
+                                <button
+                                  className="s-btn"
+                                  onClick={() => {
+                                    const next = { ...settings, enhance_model: m.name };
+                                    setSettings(next);
+                                    invoke("save_settings", { settings: next }).then(refresh);
+                                  }}
+                                >
+                                  Use
+                                </button>
+                              )}
+                              <button className="s-btn s-btn--ghost" onClick={() => deleteModel(m.name)}>
+                                Delete
+                              </button>
+                            </div>
+                          ) : dl?.active ? (
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <span className="s-count">{dl.pct}%</span>
+                              <button className="s-btn s-btn--ghost" onClick={cancelDownload}>
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button className="s-btn s-btn--primary" onClick={() => startDownload(m.name)}>
+                              Download
+                            </button>
+                          )}
+                        </div>
+                        {dl?.error && (
+                          <p className="s-help" style={{ color: "var(--danger, #ff6b6b)" }}>
+                            {dl.error}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  <div className="s-section-label">Style</div>
+                  <div className="s-field">
+                    <label className="s-label">Style</label>
+                    <select
+                      className="s-select"
+                      value={settings.enhance_mode ?? "clean"}
+                      onChange={(e) => setSettings({ ...settings, enhance_mode: e.target.value })}
+                    >
+                      <option value="auto">Automatic (per app)</option>
+                      <option value="clean">Clean up (fillers, punctuation)</option>
+                      <option value="message">Casual message</option>
+                      <option value="email">Professional email</option>
+                      <option value="notes">Bullet-point notes</option>
+                      <option value="custom">Custom…</option>
+                    </select>
+                    <p className="s-help">
+                      {settings.enhance_mode === "auto"
+                        ? "The model is told which app you're dictating into and matches its tone — a casual message in Slack, a proper email in Mail, concise notes in a docs app, and so on."
+                        : 'How the model reshapes your words. "Clean up" keeps your wording and just tidies it.'}
+                    </p>
+                  </div>
+
+                  <div className="s-field">
+                    <label className="s-label">Intensity</label>
+                    <select
+                      className="s-select"
+                      value={settings.enhance_intensity ?? "balanced"}
+                      onChange={(e) => setSettings({ ...settings, enhance_intensity: e.target.value })}
+                    >
+                      <option value="light">Light — tidy up, keep my words</option>
+                      <option value="balanced">Medium — restructure &amp; tighten</option>
+                      <option value="strong">Heavy — full rewrite</option>
+                    </select>
+                    <p className="s-help">
+                      How much to rewrite. Light fixes grammar and keeps your wording; Medium and
+                      Heavy actively reorganize and polish (and will change your text noticeably).
+                    </p>
+                  </div>
+
+                  <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!settings.enhance_voice_commands}
+                      onChange={(e) =>
+                        setSettings({ ...settings, enhance_voice_commands: e.target.checked })
+                      }
+                    />
+                    <div>
+                      <div className="s-card__title">Follow spoken commands</div>
+                      <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                        If you say an instruction like "make this more professional" or "turn this
+                        into bullet points," the model carries it out instead of typing it. Powerful,
+                        but can occasionally act on words you meant literally.
+                      </p>
+                    </div>
+                  </label>
+
+                  {settings.enhance_mode === "custom" && (
+                    <div className="s-field">
+                      <label className="s-label">Custom instruction</label>
+                      <textarea
+                        className="s-input"
+                        rows={3}
+                        maxLength={2000}
+                        placeholder="e.g. Rewrite as a concise Slack message in a friendly tone."
+                        value={settings.enhance_custom_prompt ?? ""}
+                        onChange={(e) =>
+                          setSettings({ ...settings, enhance_custom_prompt: e.target.value })
+                        }
+                      />
+                      <p className="s-help">
+                        Applied on top of the safety rules (never adds facts, never translates,
+                        outputs only your text).
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="s-section-label">Debugging</div>
+                  <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!settings.enhance_debug_log}
+                      onChange={(e) =>
+                        setSettings({ ...settings, enhance_debug_log: e.target.checked })
+                      }
+                    />
+                    <div>
+                      <div className="s-card__title">Log enhancement details to a file</div>
+                      <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                        Records the raw transcript, the exact prompt sent to the model, and its
+                        response for each dictation. Stays on your Mac — useful for tuning styles.
+                      </p>
+                    </div>
+                  </label>
+                  {settings.enhance_debug_log && (
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        className="s-btn s-btn--ghost s-btn--sm"
+                        onClick={() => invoke("open_enhancement_log").catch(() => {})}
+                      >
+                        Open log
+                      </button>
+                      <button
+                        className="s-btn s-btn--ghost s-btn--sm"
+                        onClick={() => invoke("clear_enhancement_log").catch(() => {})}
+                      >
+                        Clear log
+                      </button>
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: 8 }}>
+                    <button className="s-btn s-btn--primary" onClick={handleSave}>
+                      {saved ? "Saved ✓" : "Save"}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </>
         )}
@@ -1449,6 +1707,13 @@ function NavIcon({ id }: { id: Tab }) {
         <svg {...common}>
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      );
+    case "enhance":
+      return (
+        <svg {...common}>
+          <path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5z" />
+          <path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9L18 15z" />
         </svg>
       );
     case "history":

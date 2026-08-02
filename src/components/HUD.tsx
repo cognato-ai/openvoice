@@ -7,7 +7,7 @@ import "./HUD.css";
 // coordinator driven by the shortcut press/release). This component is a pure
 // display of the `hud-state` events it emits — it never decides when to
 // start/stop and never shows or hides its own window.
-type Phase = "idle" | "recording" | "transcribing" | "result" | "error";
+type Phase = "idle" | "recording" | "transcribing" | "enhancing" | "result" | "error";
 
 interface HudState {
   phase: Phase;
@@ -84,7 +84,7 @@ export default function HUD() {
       <div className={`hud__pill hud__pill--${phase} ${hasPreview ? "hud__pill--tall" : ""}`} data-tauri-drag-region>
         <div className="hud__main">
           <div className="hud__lead">
-            {phase === "transcribing" ? (
+            {phase === "transcribing" || phase === "enhancing" ? (
               <span className="hud__dots">
                 <i />
                 <i />
@@ -116,6 +116,7 @@ export default function HUD() {
               </div>
             )}
             {phase === "transcribing" && <span className="hud__text">Transcribing</span>}
+            {phase === "enhancing" && <span className="hud__text">Enhancing</span>}
             {phase === "result" && (
               <span className="hud__text hud__text--result" title={text}>
                 {text.trim()}

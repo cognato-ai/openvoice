@@ -1,6 +1,7 @@
 // lib.rs — OpenVoice Tauri backend entry point.
 
 mod audio;
+mod llm;
 mod model_manager;
 mod output;
 mod speech;
@@ -22,7 +23,12 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptEntry {
     pub id: u64,
+    /// What was actually pasted (the enhanced text when enhancement is on).
     pub text: String,
+    /// The original raw transcript, kept only when enhancement changed it, so
+    /// the UI can offer a "view original". `None` when it equals `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
     pub timestamp: u64,
 }
 
@@ -79,6 +85,32 @@ pub struct AppSettings {
     /// disappear (WisprFlow-style) rather than echo it back.
     #[serde(default)]
     pub show_transcript_in_overlay: bool,
+
+    // ── Transcript enhancement (V2): a small local LLM polishes the raw ASR
+    //    text before it's pasted. All off by default (opt-in). See llm.rs.
+    /// Master switch for LLM post-processing.
+    #[serde(default)]
+    pub enhance_enabled: bool,
+    /// Slug of the downloaded enhancement model (empty = none selected).
+    #[serde(default)]
+    pub enhance_model: String,
+    /// "auto" | "clean" | "message" | "email" | "notes" | "custom"
+    #[serde(default = "default_enhance_mode")]
+    pub enhance_mode: String,
+    /// "light" | "balanced" | "strong"
+    #[serde(default = "default_enhance_intensity")]
+    pub enhance_intensity: String,
+    /// Custom instruction used when enhance_mode == "custom".
+    #[serde(default)]
+    pub enhance_custom_prompt: String,
+    /// Obey spoken instructions in the transcript ("make this more formal",
+    /// "summarize this") instead of transcribing them literally. Off by default.
+    #[serde(default)]
+    pub enhance_voice_commands: bool,
+    /// Write each enhancement (raw transcript, full prompt, model response) to
+    /// enhancement.log for debugging. Off by default.
+    #[serde(default)]
+    pub enhance_debug_log: bool,
 }
 
 fn default_true() -> bool {
@@ -95,6 +127,15 @@ fn default_silence_threshold() -> f32 {
 }
 fn default_theme() -> String {
     "system".into()
+}
+fn default_enhance_mode() -> String {
+    "clean".into()
+}
+fn default_enhance_intensity() -> String {
+    // Light (level 1) by default: safe for short dictations. Medium/Heavy add
+    // the aggressive "must restructure" levels, which help long rambling text
+    // but over-edit a short one-liner.
+    "light".into()
 }
 
 impl Default for AppSettings {
@@ -118,6 +159,13 @@ impl Default for AppSettings {
             hide_dock_icon: false,
             live_preview: false,
             show_transcript_in_overlay: false,
+            enhance_enabled: false,
+            enhance_model: String::new(),
+            enhance_mode: default_enhance_mode(),
+            enhance_intensity: default_enhance_intensity(),
+            enhance_custom_prompt: String::new(),
+            enhance_voice_commands: false,
+            enhance_debug_log: false,
         }
     }
 }
@@ -154,6 +202,10 @@ pub struct AppState {
     /// recording started during the previous result's linger never gets its
     /// overlay yanked away.
     pub hud_generation: std::sync::atomic::AtomicU64,
+    /// Name of the app that was frontmost when the current recording started,
+    /// captured on Press (on the main thread). Given to the model as context in
+    /// "Automatic (per app)" enhancement.
+    pub frontmost_app: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -170,6 +222,7 @@ impl AppState {
             download_cancel: Mutex::new(None),
             coord_tx: Mutex::new(None),
             hud_generation: std::sync::atomic::AtomicU64::new(0),
+            frontmost_app: Mutex::new(None),
         }
     }
 }
@@ -195,7 +248,7 @@ pub enum CoordCmd {
 /// Overlay state pushed to the HUD webview.
 #[derive(Clone, Serialize)]
 struct HudPayload {
-    phase: String, // "recording" | "transcribing" | "result" | "error" | "idle"
+    phase: String, // "recording" | "transcribing" | "enhancing" | "result" | "error" | "idle"
     text: String,
     show_text: bool,
 }
@@ -234,6 +287,35 @@ fn hud_log(msg: &str) {
     }
 }
 
+/// Absolute path of the opt-in enhancement debug log.
+fn enhance_log_path() -> PathBuf {
+    model_manager::app_data_dir().join("enhancement.log")
+}
+
+/// Appends a detailed enhancement record (raw transcript, full prompt, model
+/// response) to a separate opt-in log file. Only called when the user enables
+/// `enhance_debug_log`. Capped like the main log so it can't grow unbounded.
+fn enhance_log(block: &str) {
+    use std::io::Write;
+    let path = enhance_log_path();
+    const MAX_LOG_BYTES: u64 = 1024 * 1024; // 1 MB (entries are large)
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > MAX_LOG_BYTES {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                let keep_from = raw.len() / 2;
+                let start = raw[keep_from..]
+                    .find('\n')
+                    .map(|i| keep_from + i + 1)
+                    .unwrap_or(keep_from);
+                let _ = std::fs::write(&path, &raw[start..]);
+            }
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{block}");
+    }
+}
+
 fn emit_hud(app: &AppHandle, phase: &str, text: &str, show_text: bool) {
     let _ = app.emit(
         "hud-state",
@@ -269,6 +351,22 @@ fn schedule_hide(app: &AppHandle, delay_ms: u64) {
 fn coordinator_start(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
     let settings = state.settings.lock().clone();
+
+    // Capture the frontmost app NOW, while the user's target app is still
+    // focused (our overlay never steals focus), for "Automatic (per app)"
+    // enhancement. Runs on the main thread (AppKit requirement); the result
+    // lands well before Release since the user speaks for a moment first. Only
+    // needed when auto mode is active.
+    if settings.enhance_enabled && settings.enhance_mode == "auto" {
+        // Clear first so a fast tap (before the main-thread read lands) falls
+        // back cleanly instead of reusing the previous recording's app.
+        *state.frontmost_app.lock() = None;
+        let app2 = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let name = output::frontmost_app_name();
+            *app2.state::<AppState>().frontmost_app.lock() = name;
+        });
+    }
 
     if !model_manager::is_model_downloaded(&settings.model) {
         show_hud_window(app);
@@ -342,7 +440,98 @@ fn coordinator_stop(app: &AppHandle) {
 
     match result {
         Ok(text) if !text.trim().is_empty() => {
-            let mut text = text.trim().to_string();
+            let raw = text.trim().to_string();
+
+            // Optional LLM enhancement. Best-effort: on ANY failure (model not
+            // downloaded, load/generation error, timeout) we keep `raw`, so the
+            // user always gets their transcript. `enhanced_differs` tracks
+            // whether to preserve the original in history.
+            let mut text = raw.clone();
+            if settings.enhance_enabled
+                && !settings.enhance_model.is_empty()
+                && model_manager::is_model_downloaded(&settings.enhance_model)
+            {
+                emit_hud(app, "enhancing", "", false);
+                hud_log("[coord] enhancing");
+                let dir = model_manager::resolved_model_dir(&settings.enhance_model);
+
+                // "Automatic (per app)": pass the frontmost app name and let the
+                // model adapt — no hardcoded per-app formatting. Other modes use
+                // the user's chosen mode with no app context.
+                let app_name: Option<String> = if settings.enhance_mode == "auto" {
+                    let a = state.frontmost_app.lock().clone();
+                    if let Some(name) = &a {
+                        hud_log(&format!("[coord] auto mode, app: {name}"));
+                    }
+                    a
+                } else {
+                    None
+                };
+
+                let sys = llm::system_prompt(
+                    &settings.enhance_mode,
+                    &settings.enhance_intensity,
+                    &settings.enhance_custom_prompt,
+                    app_name.as_deref(),
+                    settings.enhance_voice_commands,
+                );
+                let temperature = llm::temperature_for(&settings.enhance_intensity);
+                let params = llm::GenParams { temperature };
+                let t0 = std::time::Instant::now();
+                let outcome = llm::enhance(
+                    &dir,
+                    &sys,
+                    &raw,
+                    params,
+                    std::time::Duration::from_secs(8),
+                );
+                let elapsed_ms = t0.elapsed().as_millis();
+
+                let outcome_str = match &outcome {
+                    Ok(enhanced) if !enhanced.trim().is_empty() => {
+                        text = enhanced.trim().to_string();
+                        hud_log(&format!("[coord] enhanced ({} chars)", text.len()));
+                        format!("OUTPUT (pasted):\n{}", text)
+                    }
+                    Ok(_) => {
+                        hud_log("[coord] enhancement returned empty — using raw");
+                        "OUTPUT: <empty> — fell back to raw transcript".to_string()
+                    }
+                    Err(e) => {
+                        log::warn!("[llm] enhancement failed: {e}");
+                        hud_log(&format!("[coord] enhancement failed ({e}) — using raw"));
+                        format!("ERROR: {e} — fell back to raw transcript")
+                    }
+                };
+
+                // Opt-in detailed log: raw transcript, resolved settings, the
+                // exact prompt sent, and the model's response.
+                if settings.enhance_debug_log {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    enhance_log(&format!(
+                        "===== {ts} =====\n\
+                         mode={} app={} intensity={} temp={temperature} voice_cmds={} {elapsed_ms}ms\n\
+                         ----- RAW TRANSCRIPT -----\n{raw}\n\
+                         ----- SYSTEM PROMPT -----\n{sys}\n\
+                         ----- {outcome_str}\n",
+                        settings.enhance_mode,
+                        app_name.as_deref().unwrap_or("-"),
+                        settings.enhance_intensity,
+                        settings.enhance_voice_commands,
+                    ));
+                }
+            }
+
+            // History keeps the original only when enhancement actually changed it.
+            let raw_for_history = if text.trim() != raw.trim() {
+                Some(raw.clone())
+            } else {
+                None
+            };
+
             if settings.append_trailing_space && !text.ends_with(' ') {
                 text.push(' ');
             }
@@ -358,6 +547,7 @@ fn coordinator_stop(app: &AppHandle) {
                 let entry = TranscriptEntry {
                     id: *id_counter,
                     text: text.trim().to_string(),
+                    raw: raw_for_history,
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -493,6 +683,8 @@ fn save_settings(
     let model_changed = old.model != settings.model;
     let hotkey_changed = old.hotkey != settings.hotkey;
     let dock_changed = old.hide_dock_icon != settings.hide_dock_icon;
+    let enhance_changed = old.enhance_model != settings.enhance_model
+        || old.enhance_enabled != settings.enhance_enabled;
 
     *state.settings.lock() = settings.clone();
     persist_settings(&settings)?;
@@ -525,6 +717,22 @@ fn save_settings(
         app.global_shortcut()
             .register(settings.hotkey.as_str())
             .map_err(|e| format!("Could not register shortcut: {e}"))?;
+    }
+
+    if enhance_changed {
+        llm::unload_llm();
+        // Warm the enhancement model in the background if enabled + downloaded.
+        if settings.enhance_enabled
+            && !settings.enhance_model.is_empty()
+            && model_manager::is_model_downloaded(&settings.enhance_model)
+        {
+            let dir = model_manager::resolved_model_dir(&settings.enhance_model);
+            std::thread::spawn(move || {
+                if let Err(e) = llm::preload_llm(&dir) {
+                    log::warn!("[llm] preload failed: {e}");
+                }
+            });
+        }
     }
 
     Ok(())
@@ -730,9 +938,25 @@ async fn download_model(
 
     *state.download_cancel.lock() = None;
 
+    let warm_name = model_name.clone();
+
+    if model_manager::model_kind(&warm_name) == "llm" {
+        // Enhancement model: warm it only if it's the selected one and
+        // enhancement is enabled.
+        let s = state.settings.lock();
+        if s.enhance_enabled && s.enhance_model == warm_name {
+            let dir = model_manager::resolved_model_dir(&warm_name);
+            std::thread::spawn(move || {
+                if let Err(e) = llm::preload_llm(&dir) {
+                    log::warn!("[llm] preload after download failed: {e}");
+                }
+            });
+        }
+        return Ok(());
+    }
+
     let active = state.settings.lock().model.clone();
     // Warm if the downloaded name (or mapped ggml) is active
-    let warm_name = model_name.clone();
     if active == warm_name || model_manager::model_path(&warm_name).exists() {
         let path = if model_manager::model_path(&warm_name).exists() {
             model_manager::model_path(&warm_name)
@@ -788,6 +1012,29 @@ fn open_models_folder() -> Result<(), String> {
         .arg(path)
         .spawn()
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_enhancement_log() -> Result<(), String> {
+    let path = enhance_log_path();
+    if !path.exists() {
+        std::fs::write(&path, "# OpenVoice enhancement log — enable logging and dictate to populate.\n")
+            .map_err(|e| e.to_string())?;
+    }
+    std::process::Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn clear_enhancement_log() -> Result<(), String> {
+    let path = enhance_log_path();
+    if path.exists() {
+        std::fs::write(&path, "").map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -859,6 +1106,17 @@ fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     s.silence_threshold = s.silence_threshold.clamp(0.0, 0.1);
     if s.hotkey.trim().is_empty() {
         s.hotkey = "Alt+Space".into();
+    }
+    if !["auto", "clean", "message", "email", "notes", "custom"].contains(&s.enhance_mode.as_str()) {
+        s.enhance_mode = "clean".into();
+    }
+    if !["light", "balanced", "strong"].contains(&s.enhance_intensity.as_str()) {
+        s.enhance_intensity = "balanced".into();
+    }
+    // Bound the custom prompt so an imported settings file can't smuggle in an
+    // enormous instruction blob.
+    if s.enhance_custom_prompt.chars().count() > 2000 {
+        s.enhance_custom_prompt = s.enhance_custom_prompt.chars().take(2000).collect();
     }
     s
 }
@@ -1125,6 +1383,17 @@ pub fn run() {
     let app_state = AppState::new();
     let default_hotkey = app_state.settings.lock().hotkey.clone();
     let preload_model = app_state.settings.lock().model.clone();
+    // Spawn the enhancement-model worker thread now; it stays idle until a model
+    // is loaded. Capture whether to warm one at startup (only if enabled + present).
+    llm::init_llm();
+    let preload_enhance = {
+        let s = app_state.settings.lock();
+        if s.enhance_enabled && !s.enhance_model.is_empty() {
+            Some(s.enhance_model.clone())
+        } else {
+            None
+        }
+    };
 
     let mut builder = tauri::Builder::default()
         .plugin(
@@ -1212,6 +1481,18 @@ pub fn run() {
                         log::warn!("[speech] startup preload failed: {e}");
                     }
                 });
+            }
+
+            // Warm the enhancement model too, if enabled and downloaded.
+            if let Some(enhance_model) = preload_enhance {
+                if model_manager::is_model_downloaded(&enhance_model) {
+                    let dir = model_manager::resolved_model_dir(&enhance_model);
+                    std::thread::spawn(move || {
+                        if let Err(e) = llm::preload_llm(&dir) {
+                            log::warn!("[llm] startup preload failed: {e}");
+                        }
+                    });
+                }
             }
 
             // Informational header: current dictation shortcut (disabled row).
@@ -1335,6 +1616,8 @@ pub fn run() {
             cancel_download,
             delete_model,
             open_models_folder,
+            open_enhancement_log,
+            clear_enhancement_log,
             clear_history,
             show_settings_window,
             list_microphones,
