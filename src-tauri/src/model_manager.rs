@@ -54,6 +54,9 @@ pub struct AppModel {
     pub downloaded: bool,
     pub languages: Vec<String>,
     pub family: String,
+    /// "asr" or "llm" — lets the frontend split speech models from enhancement
+    /// models into separate sections.
+    pub kind: String,
     /// 1-indexed position after ranking by speed + accuracy (recommended
     /// models first). Lower is better — shown as a "#N" badge in the UI.
     pub rank: u32,
@@ -158,6 +161,13 @@ pub fn resolved_model_path(name: &str) -> PathBuf {
     model_path(name)
 }
 
+/// Resolves a catalog model name to its containing directory
+/// (`models_dir()/catalog/<slug>/`). LLM enhancement models need the directory
+/// (which holds both the GGUF and `tokenizer.json`), not the single GGUF file.
+pub fn resolved_model_dir(name: &str) -> PathBuf {
+    models_dir().join("catalog").join(name)
+}
+
 pub fn model_files(name: &str) -> Vec<ModelFile> {
     match name {
         "parakeet-tdt-0.6b-v3" => vec![
@@ -196,6 +206,11 @@ struct CatalogModel {
     name: String,
     architecture: String,
     family: String,
+    /// "asr" (default, speech→text) or "llm" (text post-processor). Lets one
+    /// catalog hold both kinds; LLM entries are surfaced only in the
+    /// Enhancement UI, never the ASR model picker.
+    #[serde(default = "default_kind")]
+    kind: String,
     description: String,
     #[serde(default)]
     languages: Vec<String>,
@@ -218,6 +233,15 @@ struct CatalogFile {
     filename: String,
     quant: String,
     size_bytes: u64,
+    /// Optional HuggingFace repo override for this file. Defaults to the model
+    /// entry's `id`. Used e.g. when the GGUF and tokenizer.json live in
+    /// different repos (unsloth GGUF + official Qwen tokenizer).
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+fn default_kind() -> String {
+    "asr".into()
 }
 
 /// Models empirically confirmed to return an empty transcript for real
@@ -310,6 +334,7 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
                 downloaded: is_model_downloaded(&name),
                 languages: w.languages.iter().map(|s| (*s).to_string()).collect(),
                 family: engine.into(),
+                kind: "asr".into(),
                 rank: 0,
             },
             w.recommended,
@@ -378,6 +403,7 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
                     m.languages.clone()
                 },
                 family: m.family.clone(),
+                kind: m.kind.clone(),
                 rank: 0,
             },
             m.recommended,
@@ -426,6 +452,32 @@ pub fn resolve_download(name: &str) -> Result<(PathBuf, Vec<(String, String)>), 
         .find(|m| m.slug == name || m.id == name)
         .ok_or_else(|| format!("Unknown model: {name}"))?;
 
+    let dest = models_dir().join("catalog").join(&m.slug);
+    fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+
+    let url_for = |f: &CatalogFile| {
+        let repo = f.repo.as_deref().unwrap_or(m.id.as_str());
+        format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            repo, f.filename
+        )
+    };
+
+    // LLM models need every file in the entry (the GGUF *and* tokenizer.json,
+    // which may live in different repos); ASR models only need the single
+    // default-quant GGUF.
+    if m.kind == "llm" {
+        if m.files.is_empty() {
+            return Err("No files in catalog entry".to_string());
+        }
+        let list = m
+            .files
+            .iter()
+            .map(|f| (f.filename.clone(), url_for(f)))
+            .collect();
+        return Ok((dest, list));
+    }
+
     let file = m
         .files
         .iter()
@@ -433,15 +485,19 @@ pub fn resolve_download(name: &str) -> Result<(PathBuf, Vec<(String, String)>), 
         .or_else(|| m.files.first())
         .ok_or_else(|| "No files in catalog entry".to_string())?;
 
-    let dest = models_dir().join("catalog").join(&m.slug);
-    fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-    let url = format!(
-        "https://huggingface.co/{}/resolve/main/{}",
-        m.id, file.filename
-    );
-    Ok((dest, vec![(file.filename.clone(), url)]))
+    Ok((dest, vec![(file.filename.clone(), url_for(file))]))
 }
 
 pub fn catalog_count() -> usize {
     load_catalog().len()
+}
+
+/// "llm" for text-enhancement models, "asr" for everything else (including the
+/// hardcoded Parakeet entry and any unknown name).
+pub fn model_kind(name: &str) -> String {
+    load_catalog()
+        .iter()
+        .find(|m| m.slug == name || m.id == name)
+        .map(|m| m.kind.clone())
+        .unwrap_or_else(|| "asr".into())
 }

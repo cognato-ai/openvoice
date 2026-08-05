@@ -3,6 +3,82 @@
   "generated_at": "2026-07-01T13:30:59+00:00",
   "models": [
     {
+      "id": "unsloth/Qwen3-0.6B-GGUF",
+      "slug": "qwen3-0.6b",
+      "name": "Qwen3 0.6B (Enhancement, fast)",
+      "architecture": "qwen3",
+      "family": "qwen3",
+      "kind": "llm",
+      "parameters": "0.6B",
+      "description": "Tiny, fast local LLM that cleans up and reformats your dictated text before it's pasted. Great for cleanup and email; lighter on notes. Runs on-device.",
+      "base_model": "Qwen/Qwen3-0.6B",
+      "license": "apache-2.0",
+      "language_count": 100,
+      "languages": [],
+      "capabilities": {
+        "streaming": false,
+        "translate": false,
+        "lang_detect": false,
+        "timestamps": "none"
+      },
+      "speed_score": 0,
+      "accuracy_score": 0,
+      "files": [
+        {
+          "filename": "Qwen3-0.6B-Q4_K_M.gguf",
+          "quant": "Q4_K_M",
+          "size_bytes": 396705472
+        },
+        {
+          "filename": "tokenizer.json",
+          "quant": "tokenizer",
+          "size_bytes": 11422654,
+          "repo": "Qwen/Qwen3-0.6B"
+        }
+      ],
+      "default_quant": "Q4_K_M",
+      "recommended": false,
+      "recommended_rank": null
+    },
+    {
+      "id": "unsloth/Qwen3-1.7B-GGUF",
+      "slug": "qwen3-1.7b",
+      "name": "Qwen3 1.7B (Enhancement, higher quality)",
+      "architecture": "qwen3",
+      "family": "qwen3",
+      "kind": "llm",
+      "parameters": "1.7B",
+      "description": "Larger local enhancement model — better at notes, formatting, and adapting to the app, at the cost of size and a bit of speed. Runs on-device.",
+      "base_model": "Qwen/Qwen3-1.7B",
+      "license": "apache-2.0",
+      "language_count": 100,
+      "languages": [],
+      "capabilities": {
+        "streaming": false,
+        "translate": false,
+        "lang_detect": false,
+        "timestamps": "none"
+      },
+      "speed_score": 0,
+      "accuracy_score": 0,
+      "files": [
+        {
+          "filename": "Qwen3-1.7B-Q4_K_M.gguf",
+          "quant": "Q4_K_M",
+          "size_bytes": 1107409472
+        },
+        {
+          "filename": "tokenizer.json",
+          "quant": "tokenizer",
+          "size_bytes": 11422654,
+          "repo": "Qwen/Qwen3-1.7B"
+        }
+      ],
+      "default_quant": "Q4_K_M",
+      "recommended": false,
+      "recommended_rank": null
+    },
+    {
       "id": "handy-computer/parakeet-unified-en-0.6b-gguf",
       "slug": "parakeet-unified-en-0.6b",
       "name": "Parakeet Unified EN 0.6B",

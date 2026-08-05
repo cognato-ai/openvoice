@@ -34,6 +34,16 @@ block2 = "0.6"
 # MedASR), auto-detecting architecture from the GGUF file header.
 transcribe-cpp = { version = "0.1.3", default-features = false, features = ["metal"] }
 
+# Local text LLM for transcript enhancement (V2). Candle is pure-Rust and does
+# NOT vendor a ggml C library, so it links cleanly alongside transcribe-cpp-sys's
+# statically-linked ggml. (A second ggml-based runner — e.g. llama-cpp-2 — would
+# put two ggml copies in one binary and collide on duplicate symbols, the exact
+# ODR crash we removed whisper-rs to fix.) Runs Qwen3-0.6B GGUF (quantized) on Metal.
+candle-core = { version = "0.11", features = ["metal"] }
+candle-nn = { version = "0.11", features = ["metal"] }
+candle-transformers = { version = "0.11", features = ["metal"] }
+tokenizers = "0.21"
+
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 tokio       = { version = "1", features = ["full"] }
