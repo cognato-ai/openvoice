@@ -1,0 +1,92 @@
+name: Release
+
+# Build the macOS app bundle (.app + .dmg) and attach it to a GitHub Release
+# whenever a version tag is pushed (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
+# Can also be run manually from the Actions tab.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+# tauri-action creates the release and uploads assets, so the job needs write
+# access to repository contents.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon (primary target — what the app is distributed as).
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            arch: Apple Silicon
+          # Intel Macs. Untested; remove this entry if it causes trouble.
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            arch: Intel
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install onnxruntime
+        # The app locates onnxruntime (for the optional Parakeet ASR model) at
+        # build time via ORT_DYLIB_PATH. Homebrew's prefix differs by arch:
+        # /opt/homebrew on Apple Silicon, /usr/local on Intel.
+        run: |
+          brew install onnxruntime
+          ORT="$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib"
+          echo "ORT_DYLIB_PATH=$ORT" >> "$GITHUB_ENV"
+          echo "Using ORT_DYLIB_PATH=$ORT"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through to the Rust build so the ort crate finds the dylib.
+          ORT_DYLIB_PATH: ${{ env.ORT_DYLIB_PATH }}
+        with:
+          # Reuse the pushed tag as the release. On manual runs a release named
+          # after the app version in tauri.conf.json is created instead.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'app-v__VERSION__' }}
+          releaseName: "OpenVoice ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}"
+          releaseBody: |
+            Automated build for macOS (${{ matrix.arch }}).
+
+            This build is ad-hoc signed and **not notarized** (no Apple Developer
+            account yet). On first launch macOS will warn — right-click the app and
+            choose **Open**, then confirm. You may need to re-grant Microphone and
+            Accessibility permissions after updating.
+
+            Requires onnxruntime only if you use the Parakeet ASR model:
+            `brew install onnxruntime`.
+          # Draft so you can review both arch builds, then publish manually.
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}

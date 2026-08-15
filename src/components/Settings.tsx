@@ -29,6 +29,7 @@ interface ModelInfo {
   languages: string[];
   family: string;
   kind: string; // "asr" | "llm"
+  custom: boolean; // user-added enhancement model
   rank: number;
 }
 
@@ -57,6 +58,7 @@ interface AppSettings {
   enhance_custom_prompt?: string;
   enhance_voice_commands?: boolean;
   enhance_debug_log?: boolean;
+  enhance_max_tokens?: number;
 }
 
 const LANGUAGES: [string, string][] = [
@@ -366,6 +368,7 @@ export default function Settings() {
       enhance_custom_prompt: "",
       enhance_voice_commands: false,
       enhance_debug_log: false,
+      enhance_max_tokens: 0,
       ...s,
     });
     setPerms(p);
@@ -547,6 +550,76 @@ export default function Settings() {
     },
     [refresh],
   );
+
+  const removeCustomModel = useCallback(
+    async (slug: string) => {
+      await invoke("remove_enhancement_model", { slug });
+      refresh();
+    },
+    [refresh],
+  );
+
+  // Add-custom-model form state.
+  const [showAddModel, setShowAddModel] = useState(false);
+  const [addForm, setAddForm] = useState({
+    repo: "",
+    ggufFile: "",
+    family: "qwen2",
+    tokenizerRepo: "",
+    displayName: "",
+  });
+  const [ggufChoices, setGgufChoices] = useState<string[]>([]);
+  const [addBusy, setAddBusy] = useState(false);
+  const [addError, setAddError] = useState("");
+
+  const fetchGgufFiles = useCallback(async () => {
+    setAddError("");
+    setGgufChoices([]);
+    if (!addForm.repo.trim()) return;
+    setAddBusy(true);
+    try {
+      const files = await invoke<string[]>("fetch_repo_gguf_files", { repo: addForm.repo.trim() });
+      setGgufChoices(files);
+      if (files.length === 0) {
+        setAddError("No .gguf files found in that repository.");
+      } else if (!addForm.ggufFile) {
+        setAddForm((f) => ({ ...f, ggufFile: files[0] }));
+      }
+    } catch (e: unknown) {
+      setAddError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAddBusy(false);
+    }
+  }, [addForm.repo, addForm.ggufFile]);
+
+  const submitAddModel = useCallback(async () => {
+    setAddError("");
+    if (!addForm.repo.trim() || !addForm.ggufFile.trim()) {
+      setAddError("A repository and a .gguf file are required.");
+      return;
+    }
+    setAddBusy(true);
+    try {
+      const model = {
+        slug: "",
+        displayName: addForm.displayName.trim() || addForm.repo.split("/").pop() || addForm.repo,
+        family: addForm.family,
+        repo: addForm.repo.trim(),
+        ggufFile: addForm.ggufFile.trim(),
+        tokenizerRepo: (addForm.tokenizerRepo.trim() || addForm.repo.trim()),
+        sizeBytes: 0,
+      };
+      await invoke("add_enhancement_model", { model });
+      setShowAddModel(false);
+      setAddForm({ repo: "", ggufFile: "", family: "qwen2", tokenizerRepo: "", displayName: "" });
+      setGgufChoices([]);
+      await refresh();
+    } catch (e: unknown) {
+      setAddError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAddBusy(false);
+    }
+  }, [addForm, refresh]);
 
   async function handleSave() {
     if (!settings) return;
@@ -1094,7 +1167,10 @@ export default function Settings() {
                                   Use
                                 </button>
                               )}
-                              <button className="s-btn s-btn--ghost" onClick={() => deleteModel(m.name)}>
+                              <button
+                                className="s-btn s-btn--ghost"
+                                onClick={() => (m.custom ? removeCustomModel(m.name) : deleteModel(m.name))}
+                              >
                                 Delete
                               </button>
                             </div>
@@ -1106,9 +1182,19 @@ export default function Settings() {
                               </button>
                             </div>
                           ) : (
-                            <button className="s-btn s-btn--primary" onClick={() => startDownload(m.name)}>
-                              Download
-                            </button>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                              <button className="s-btn s-btn--primary" onClick={() => startDownload(m.name)}>
+                                Download
+                              </button>
+                              {m.custom && (
+                                <button
+                                  className="s-btn s-btn--ghost"
+                                  onClick={() => removeCustomModel(m.name)}
+                                >
+                                  Remove
+                                </button>
+                              )}
+                            </div>
                           )}
                         </div>
                         {dl?.error && (
@@ -1119,6 +1205,121 @@ export default function Settings() {
                       </div>
                     );
                   })}
+
+                  {!showAddModel ? (
+                    <button
+                      className="s-btn s-btn--ghost"
+                      style={{ alignSelf: "flex-start" }}
+                      onClick={() => setShowAddModel(true)}
+                    >
+                      + Add a model from HuggingFace
+                    </button>
+                  ) : (
+                    <div className="s-card">
+                      <div className="s-card__title" style={{ marginBottom: 8 }}>
+                        Add a custom GGUF model
+                      </div>
+                      <p className="s-card__desc">
+                        Paste a HuggingFace repository that contains a GGUF file, pick the file, and
+                        tell us its family so it's loaded with the right chat format. Supported
+                        families: Qwen3, Qwen2.5, Llama&nbsp;3.x, Mistral. Results vary by model —
+                        the built-in Qwen3 models are the tuned, known-good defaults.
+                      </p>
+
+                      <div className="s-field">
+                        <label className="s-label">GGUF repository</label>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input
+                            className="s-input"
+                            style={{ flex: 1 }}
+                            placeholder="e.g. unsloth/Qwen2.5-1.5B-Instruct-GGUF"
+                            value={addForm.repo}
+                            onChange={(e) => setAddForm({ ...addForm, repo: e.target.value })}
+                          />
+                          <button className="s-btn" onClick={fetchGgufFiles} disabled={addBusy || !addForm.repo.trim()}>
+                            {addBusy ? "…" : "Fetch files"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {ggufChoices.length > 0 && (
+                        <div className="s-field">
+                          <label className="s-label">GGUF file (quantization)</label>
+                          <select
+                            className="s-select"
+                            value={addForm.ggufFile}
+                            onChange={(e) => setAddForm({ ...addForm, ggufFile: e.target.value })}
+                          >
+                            {ggufChoices.map((f) => (
+                              <option key={f} value={f}>
+                                {f}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="s-help">Q4_K_M is a good size/quality balance for on-device use.</p>
+                        </div>
+                      )}
+
+                      <div className="s-field">
+                        <label className="s-label">Family (chat format)</label>
+                        <select
+                          className="s-select"
+                          value={addForm.family}
+                          onChange={(e) => setAddForm({ ...addForm, family: e.target.value })}
+                        >
+                          <option value="qwen3">Qwen3</option>
+                          <option value="qwen2">Qwen2.5</option>
+                          <option value="llama3">Llama 3.x</option>
+                          <option value="mistral">Mistral</option>
+                        </select>
+                      </div>
+
+                      <div className="s-field">
+                        <label className="s-label">Tokenizer repository (optional)</label>
+                        <input
+                          className="s-input"
+                          placeholder="Base model repo with tokenizer.json — e.g. Qwen/Qwen2.5-1.5B-Instruct"
+                          value={addForm.tokenizerRepo}
+                          onChange={(e) => setAddForm({ ...addForm, tokenizerRepo: e.target.value })}
+                        />
+                        <p className="s-help">
+                          Where to fetch <code>tokenizer.json</code>. Leave blank to use the GGUF repo
+                          itself; set the base (non-GGUF) model repo if the GGUF repo has no tokenizer.
+                        </p>
+                      </div>
+
+                      <div className="s-field">
+                        <label className="s-label">Display name (optional)</label>
+                        <input
+                          className="s-input"
+                          placeholder="Shown in the list"
+                          value={addForm.displayName}
+                          onChange={(e) => setAddForm({ ...addForm, displayName: e.target.value })}
+                        />
+                      </div>
+
+                      {addError && (
+                        <p className="s-help" style={{ color: "var(--danger, #ff6b6b)" }}>
+                          {addError}
+                        </p>
+                      )}
+
+                      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                        <button className="s-btn s-btn--primary" onClick={submitAddModel} disabled={addBusy}>
+                          Add model
+                        </button>
+                        <button
+                          className="s-btn s-btn--ghost"
+                          onClick={() => {
+                            setShowAddModel(false);
+                            setAddError("");
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="s-section-label">Style</div>
                   <div className="s-field">
@@ -1158,6 +1359,59 @@ export default function Settings() {
                       Heavy actively reorganize and polish (and will change your text noticeably).
                     </p>
                   </div>
+
+                  {(() => {
+                    const mt = settings.enhance_max_tokens ?? 0;
+                    const presets = [0, 256, 512, 1024, 2048, -1];
+                    const isPreset = presets.includes(mt);
+                    return (
+                      <div className="s-field">
+                        <label className="s-label">Maximum length</label>
+                        <select
+                          className="s-select"
+                          value={isPreset ? String(mt) : "custom"}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (v === "custom") {
+                              // Seed the custom box with a sensible starting number.
+                              setSettings({ ...settings, enhance_max_tokens: 1024 });
+                            } else {
+                              setSettings({ ...settings, enhance_max_tokens: Number(v) });
+                            }
+                          }}
+                        >
+                          <option value="0">Auto (scale to what I said)</option>
+                          <option value="256">Short (~256 tokens)</option>
+                          <option value="512">Medium (~512 tokens)</option>
+                          <option value="1024">Long (~1024 tokens)</option>
+                          <option value="2048">Very long (~2048 tokens)</option>
+                          <option value="-1">Unconstrained</option>
+                          <option value="custom">Custom…</option>
+                        </select>
+                        {!isPreset && (
+                          <input
+                            className="s-input"
+                            type="number"
+                            min={32}
+                            max={4096}
+                            step={64}
+                            value={mt}
+                            onChange={(e) =>
+                              setSettings({ ...settings, enhance_max_tokens: Number(e.target.value) || 0 })
+                            }
+                            style={{ marginTop: 8, maxWidth: 160 }}
+                          />
+                        )}
+                        <p className="s-help">
+                          How many tokens the model may generate (roughly ¾ of a word each). "Auto"
+                          fits both short cleanups and emails. Raise it if longer command-mode
+                          outputs (emails, notes) get cut off. "Unconstrained" lets the model run
+                          until it's done — still bounded by a time limit so it can't hang, and a
+                          longer budget means a longer wait before your text appears.
+                        </p>
+                      </div>
+                    );
+                  })()}
 
                   <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
                     <input
