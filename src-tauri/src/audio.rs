@@ -5,7 +5,9 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub struct SendSyncStream(pub cpal::Stream);
+// The stream is held only to keep it alive (RAII) — it's intentionally never
+// read after construction, so silence the dead-code lint on the field.
+pub struct SendSyncStream(#[allow(dead_code)] pub cpal::Stream);
 unsafe impl Send for SendSyncStream {}
 unsafe impl Sync for SendSyncStream {}
 

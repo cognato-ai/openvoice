@@ -111,6 +111,11 @@ pub struct AppSettings {
     /// enhancement.log for debugging. Off by default.
     #[serde(default)]
     pub enhance_debug_log: bool,
+    /// Max output tokens for enhancement. `0` = auto (scale to the input, the
+    /// default); `-1` = unconstrained (bounded only by the generation
+    /// wall-clock guard); a positive value = a hard cap the user chose.
+    #[serde(default)]
+    pub enhance_max_tokens: i32,
 }
 
 fn default_true() -> bool {
@@ -166,6 +171,7 @@ impl Default for AppSettings {
             enhance_custom_prompt: String::new(),
             enhance_voice_commands: false,
             enhance_debug_log: false,
+            enhance_max_tokens: 0,
         }
     }
 }
@@ -476,15 +482,20 @@ fn coordinator_stop(app: &AppHandle) {
                     settings.enhance_voice_commands,
                 );
                 let temperature = llm::temperature_for(&settings.enhance_intensity);
-                let params = llm::GenParams { temperature };
+                let params = llm::GenParams {
+                    temperature,
+                    max_tokens: settings.enhance_max_tokens,
+                };
                 let t0 = std::time::Instant::now();
-                let outcome = llm::enhance(
-                    &dir,
-                    &sys,
-                    &raw,
-                    params,
-                    std::time::Duration::from_secs(8),
-                );
+                // Wait a hair longer than the in-worker time budget (which scales
+                // with the user's token setting) so the worker's own guard trips
+                // first and returns raw cleanly, rather than the caller timing out
+                // while the worker keeps running. Normal cleanups finish in well
+                // under a second; a raised/unconstrained budget waits longer
+                // before falling back to raw.
+                let call_timeout = llm::gen_time_budget(settings.enhance_max_tokens)
+                    + std::time::Duration::from_secs(2);
+                let outcome = llm::enhance(&dir, &sys, &raw, params, call_timeout);
                 let elapsed_ms = t0.elapsed().as_millis();
 
                 let outcome_str = match &outcome {
@@ -513,7 +524,7 @@ fn coordinator_stop(app: &AppHandle) {
                         .unwrap_or(0);
                     enhance_log(&format!(
                         "===== {ts} =====\n\
-                         mode={} app={} intensity={} temp={temperature} voice_cmds={} {elapsed_ms}ms\n\
+                         mode={} app={} intensity={} temp={temperature} voice_cmds={} max_tokens={} {elapsed_ms}ms\n\
                          ----- RAW TRANSCRIPT -----\n{raw}\n\
                          ----- SYSTEM PROMPT -----\n{sys}\n\
                          ----- {outcome_str}\n",
@@ -521,6 +532,7 @@ fn coordinator_stop(app: &AppHandle) {
                         app_name.as_deref().unwrap_or("-"),
                         settings.enhance_intensity,
                         settings.enhance_voice_commands,
+                        settings.enhance_max_tokens,
                     ));
                 }
             }
@@ -1004,6 +1016,67 @@ fn delete_model(state: State<'_, AppState>, model_name: String) -> Result<(), St
     Ok(())
 }
 
+/// Register a user-supplied enhancement model. It appears in the Enhancement UI
+/// immediately (as not-downloaded); the frontend then triggers a normal
+/// download. Returns the final slug.
+#[tauri::command]
+fn add_enhancement_model(model: model_manager::UserModel) -> Result<String, String> {
+    model_manager::add_user_model(model)
+}
+
+/// Remove a user-added enhancement model: delete its files and its registry
+/// entry, and unload it if it's the active model.
+#[tauri::command]
+fn remove_enhancement_model(state: State<'_, AppState>, slug: String) -> Result<(), String> {
+    let dir = model_manager::models_dir().join("catalog").join(&slug);
+    if dir.is_dir() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    if state.settings.lock().enhance_model == slug {
+        llm::unload_llm();
+    }
+    model_manager::remove_user_model(&slug)
+}
+
+/// List the `.gguf` filenames in a HuggingFace repo, so the add-model form can
+/// offer a dropdown instead of asking the user to type an exact filename.
+#[tauri::command]
+async fn fetch_repo_gguf_files(repo: String) -> Result<Vec<String>, String> {
+    let repo = repo.trim().trim_matches('/');
+    if repo.is_empty() {
+        return Err("Repository is required".into());
+    }
+    let url = format!("https://huggingface.co/api/models/{repo}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "OpenVoice")
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} for {repo}", resp.status()));
+    }
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let mut files: Vec<String> = v
+        .get("siblings")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.get("rfilename").and_then(|n| n.as_str()))
+                .filter(|n| n.to_lowercase().ends_with(".gguf"))
+                .map(|n| n.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    Ok(files)
+}
+
 #[tauri::command]
 fn open_models_folder() -> Result<(), String> {
     model_manager::ensure_models_dir().map_err(|e| e.to_string())?;
@@ -1117,6 +1190,14 @@ fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     // enormous instruction blob.
     if s.enhance_custom_prompt.chars().count() > 2000 {
         s.enhance_custom_prompt = s.enhance_custom_prompt.chars().take(2000).collect();
+    }
+    // Max tokens: keep the sentinels (-1 unconstrained, 0 auto); clamp any
+    // positive value to a sane window so the wall-clock guard is still the real
+    // backstop for very large asks.
+    if s.enhance_max_tokens < -1 {
+        s.enhance_max_tokens = -1;
+    } else if s.enhance_max_tokens > 0 {
+        s.enhance_max_tokens = s.enhance_max_tokens.clamp(32, 4096);
     }
     s
 }
@@ -1618,6 +1699,9 @@ pub fn run() {
             open_models_folder,
             open_enhancement_log,
             clear_enhancement_log,
+            add_enhancement_model,
+            remove_enhancement_model,
+            fetch_repo_gguf_files,
             clear_history,
             show_settings_window,
             list_microphones,

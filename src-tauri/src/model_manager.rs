@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Full Handy catalog shipped in the binary so models always appear in the UI.
@@ -57,6 +57,9 @@ pub struct AppModel {
     /// "asr" or "llm" — lets the frontend split speech models from enhancement
     /// models into separate sections.
     pub kind: String,
+    /// True for user-added enhancement models (from `user_models.json`).
+    /// Deleting one removes its registry entry, not just its files.
+    pub custom: bool,
     /// 1-indexed position after ranking by speed + accuracy (recommended
     /// models first). Lower is better — shown as a "#N" badge in the UI.
     pub rank: u32,
@@ -335,6 +338,7 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
                 languages: w.languages.iter().map(|s| (*s).to_string()).collect(),
                 family: engine.into(),
                 kind: "asr".into(),
+                custom: false,
                 rank: 0,
             },
             w.recommended,
@@ -404,10 +408,49 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
                 },
                 family: m.family.clone(),
                 kind: m.kind.clone(),
+                custom: false,
                 rank: 0,
             },
             m.recommended,
             combined_score,
+        ));
+    }
+
+    // User-added enhancement models (from user_models.json). Always kind "llm";
+    // surfaced only in the Enhancement UI. Score 0 → sorted after built-ins.
+    for um in load_user_models() {
+        if seen.contains(&um.slug) {
+            continue;
+        }
+        seen.insert(um.slug.clone());
+        let downloaded = is_model_downloaded(&um.slug);
+        scored.push((
+            AppModel {
+                name: um.slug.clone(),
+                display_name: um.display_name.clone(),
+                engine: um.family.clone(),
+                architecture: um.family.clone(),
+                size: if um.size_bytes > 0 {
+                    format_bytes(um.size_bytes)
+                } else {
+                    "—".into()
+                },
+                size_bytes: um.size_bytes,
+                quality: "Custom".into(),
+                speed: "—".into(),
+                description: format!("Custom model · {}", um.repo),
+                recommended: false,
+                advanced: false,
+                runnable: true,
+                downloaded,
+                languages: vec!["custom".into()],
+                family: um.family.clone(),
+                kind: "llm".into(),
+                custom: true,
+                rank: 0,
+            },
+            false,
+            0,
         ));
     }
 
@@ -429,6 +472,38 @@ pub fn list_models_for_ui() -> Vec<AppModel> {
 }
 
 pub fn resolve_download(name: &str) -> Result<(PathBuf, Vec<(String, String)>), String> {
+    // User-added enhancement model: GGUF from its repo + tokenizer.json from its
+    // (possibly different) tokenizer repo, into models/catalog/<slug>/. Also
+    // drop the family sidecar so the loader knows which architecture to use.
+    if let Some(um) = find_user_model(name) {
+        let dest = models_dir().join("catalog").join(&um.slug);
+        fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+        write_model_meta(&dest, &um.family);
+        let gguf_url = format!(
+            "https://huggingface.co/{}/resolve/main/{}",
+            um.repo, um.gguf_file
+        );
+        let tok_url = format!(
+            "https://huggingface.co/{}/resolve/main/tokenizer.json",
+            um.tokenizer_repo
+        );
+        // The GGUF may be nested in a subfolder in the repo (its rfilename keeps
+        // the path), but save it flat under its basename so `find_gguf` sees it.
+        let gguf_local = um
+            .gguf_file
+            .rsplit('/')
+            .next()
+            .unwrap_or(&um.gguf_file)
+            .to_string();
+        return Ok((
+            dest,
+            vec![
+                (gguf_local, gguf_url),
+                ("tokenizer.json".to_string(), tok_url),
+            ],
+        ));
+    }
+
     let files = model_files(name);
     if !files.is_empty() {
         let dest = if name == "parakeet-tdt-0.6b-v3" {
@@ -470,6 +545,8 @@ pub fn resolve_download(name: &str) -> Result<(PathBuf, Vec<(String, String)>), 
         if m.files.is_empty() {
             return Err("No files in catalog entry".to_string());
         }
+        // Family sidecar so the loader picks the right architecture/template.
+        write_model_meta(&dest, &m.family);
         let list = m
             .files
             .iter()
@@ -495,9 +572,119 @@ pub fn catalog_count() -> usize {
 /// "llm" for text-enhancement models, "asr" for everything else (including the
 /// hardcoded Parakeet entry and any unknown name).
 pub fn model_kind(name: &str) -> String {
-    load_catalog()
-        .iter()
-        .find(|m| m.slug == name || m.id == name)
-        .map(|m| m.kind.clone())
-        .unwrap_or_else(|| "asr".into())
+    if let Some(m) = load_catalog().iter().find(|m| m.slug == name || m.id == name) {
+        return m.kind.clone();
+    }
+    if find_user_model(name).is_some() {
+        return "llm".into();
+    }
+    "asr".into()
+}
+
+// ── User-added enhancement (LLM) models ──────────────────────────────────────
+
+/// A user-supplied enhancement model. Persisted in `user_models.json` so custom
+/// models survive restarts and appear in the Enhancement UI alongside built-ins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserModel {
+    /// Filesystem-safe id, also the models/catalog/<slug>/ directory name.
+    pub slug: String,
+    pub display_name: String,
+    /// Chat family / loader: "qwen3" | "qwen2" | "llama3" | "mistral".
+    pub family: String,
+    /// HF repo holding the GGUF (e.g. "unsloth/Qwen2.5-1.5B-Instruct-GGUF").
+    pub repo: String,
+    /// GGUF filename inside `repo`.
+    pub gguf_file: String,
+    /// HF repo holding tokenizer.json — often the base (non-GGUF) model repo.
+    pub tokenizer_repo: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+}
+
+pub fn user_models_path() -> PathBuf {
+    app_data_dir().join("user_models.json")
+}
+
+pub fn load_user_models() -> Vec<UserModel> {
+    fs::read_to_string(user_models_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_user_models(models: &[UserModel]) -> Result<(), String> {
+    ensure_app_data_dir().map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(models).map_err(|e| e.to_string())?;
+    fs::write(user_models_path(), json).map_err(|e| e.to_string())
+}
+
+pub fn find_user_model(slug: &str) -> Option<UserModel> {
+    load_user_models().into_iter().find(|x| x.slug == slug)
+}
+
+/// Turn arbitrary text into a filesystem-safe, lowercase slug.
+fn sanitize_slug(s: &str) -> String {
+    let mut out: String = s
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Add (or replace by slug) a user model. Rejects empty names and collisions
+/// with built-in catalog slugs. Returns the final slug used.
+pub fn add_user_model(mut m: UserModel) -> Result<String, String> {
+    let slug = sanitize_slug(if m.slug.trim().is_empty() {
+        &m.display_name
+    } else {
+        &m.slug
+    });
+    if slug.is_empty() {
+        return Err("A model name is required".into());
+    }
+    if m.repo.trim().is_empty() || m.gguf_file.trim().is_empty() {
+        return Err("Repository and GGUF file are required".into());
+    }
+    if load_catalog().iter().any(|c| c.slug == slug) {
+        return Err(format!("'{slug}' is a built-in model name — choose another"));
+    }
+    if m.tokenizer_repo.trim().is_empty() {
+        m.tokenizer_repo = m.repo.clone();
+    }
+    if m.display_name.trim().is_empty() {
+        m.display_name = slug.clone();
+    }
+    m.slug = slug.clone();
+    let mut models = load_user_models();
+    models.retain(|x| x.slug != slug);
+    models.push(m);
+    save_user_models(&models)?;
+    Ok(slug)
+}
+
+pub fn remove_user_model(slug: &str) -> Result<(), String> {
+    let mut models = load_user_models();
+    let before = models.len();
+    models.retain(|x| x.slug != slug);
+    if models.len() == before {
+        return Ok(());
+    }
+    save_user_models(&models)
+}
+
+/// Write the `openvoice.json` family sidecar into a model directory so the LLM
+/// loader knows which architecture/chat template to use for this GGUF.
+pub fn write_model_meta(dir: &Path, family: &str) {
+    let _ = fs::create_dir_all(dir);
+    let _ = fs::write(
+        dir.join("openvoice.json"),
+        format!("{{\"family\":\"{family}\"}}"),
+    );
 }

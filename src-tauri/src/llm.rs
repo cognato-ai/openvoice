@@ -21,8 +21,104 @@ use std::time::{Duration, Instant};
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::quantized_qwen3::ModelWeights;
+use candle_transformers::models::{
+    quantized_llama, quantized_qwen2, quantized_qwen3,
+};
 use tokenizers::Tokenizer;
+
+/// Chat family — selects both the Candle loader and the chat template. Mistral
+/// shares the llama loader but uses a different prompt format, so it's distinct.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Family {
+    Qwen3,
+    Qwen2,
+    Llama3,
+    Mistral,
+}
+
+impl Family {
+    fn parse(s: &str) -> Family {
+        match s.trim().to_lowercase().as_str() {
+            "qwen2" | "qwen2.5" | "qwen25" => Family::Qwen2,
+            "llama" | "llama3" | "llama-3" | "llama3.1" | "llama3.2" | "smollm" => Family::Llama3,
+            "mistral" => Family::Mistral,
+            // Qwen3 is the default (covers our built-in models and any unknown).
+            _ => Family::Qwen3,
+        }
+    }
+
+    /// Special tokens that end generation for this family.
+    fn eos_markers(self) -> &'static [&'static str] {
+        match self {
+            Family::Qwen3 | Family::Qwen2 => &["<|im_end|>", "<|endoftext|>"],
+            Family::Llama3 => &["<|eot_id|>", "<|end_of_text|>"],
+            Family::Mistral => &["</s>"],
+        }
+    }
+
+    /// Wraps the system prompt + user text in this family's chat template.
+    fn build_prompt(self, system: &str, user: &str) -> String {
+        match self {
+            // Qwen3: ChatML with thinking explicitly closed empty so it skips
+            // its reasoning phase (faster; no <think> trace leaks).
+            Family::Qwen3 => format!(
+                "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            ),
+            // Qwen2.5: plain ChatML (no thinking phase).
+            Family::Qwen2 => format!(
+                "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"
+            ),
+            // Llama 3.x chat template.
+            Family::Llama3 => format!(
+                "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            ),
+            // Mistral Instruct — no system role, so fold it into the [INST] block.
+            Family::Mistral => format!("<s>[INST] {system}\n\n{user} [/INST]"),
+        }
+    }
+}
+
+/// The loaded quantized model, wrapping the per-family Candle type behind a
+/// uniform forward/clear interface. All three families expose the same
+/// `from_gguf(ct, reader, device)` / `forward(&mut, &Tensor, pos)` /
+/// `clear_kv_cache()` API (verified against candle-transformers 0.11).
+enum LoadedModel {
+    Qwen3(quantized_qwen3::ModelWeights),
+    Qwen2(quantized_qwen2::ModelWeights),
+    Llama(quantized_llama::ModelWeights),
+}
+
+impl LoadedModel {
+    fn forward(&mut self, x: &Tensor, pos: usize) -> candle_core::Result<Tensor> {
+        match self {
+            LoadedModel::Qwen3(m) => m.forward(x, pos),
+            LoadedModel::Qwen2(m) => m.forward(x, pos),
+            LoadedModel::Llama(m) => m.forward(x, pos),
+        }
+    }
+
+    fn clear_kv_cache(&mut self) {
+        match self {
+            LoadedModel::Qwen3(m) => m.clear_kv_cache(),
+            LoadedModel::Qwen2(m) => m.clear_kv_cache(),
+            LoadedModel::Llama(m) => m.clear_kv_cache(),
+        }
+    }
+}
+
+/// Reads the `openvoice.json` family sidecar written at download time.
+/// Defaults to Qwen3 (our built-in models, and the safest fallback).
+fn detect_family(dir: &Path) -> Family {
+    let raw = std::fs::read_to_string(dir.join("openvoice.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("family")
+                .and_then(|f| f.as_str())
+                .map(|s| s.to_string())
+        });
+    Family::parse(raw.as_deref().unwrap_or("qwen3"))
+}
 
 /// Sampling knobs for one enhancement pass.
 #[derive(Clone, Debug)]
@@ -30,13 +126,18 @@ pub struct GenParams {
     /// 0.0 → greedy/argmax (deterministic). Higher → more liberty. Kept low so
     /// the model reformats without drifting from what the user said.
     pub temperature: f32,
+    /// Output token budget from settings: `0` = auto (scale to the input),
+    /// `-1` = unconstrained (bounded only by the wall-clock guard), positive =
+    /// a hard user-chosen cap.
+    pub max_tokens: i32,
 }
 
 struct LoadedLlm {
-    model: ModelWeights,
+    model: LoadedModel,
+    family: Family,
     tokenizer: Tokenizer,
     device: Device,
-    /// Token ids that end generation (<|im_end|>, <|endoftext|>).
+    /// Token ids that end generation (family-specific EOS markers).
     eos_ids: Vec<u32>,
 }
 
@@ -129,13 +230,29 @@ fn ensure_loaded(cache: &mut Option<(PathBuf, LoadedLlm)>, model_dir: &Path) -> 
         }
     };
 
-    log::info!("[llm] Loading enhancement model from {}", gguf_path.display());
+    let family = detect_family(model_dir);
+    log::info!(
+        "[llm] Loading enhancement model ({family:?}) from {}",
+        gguf_path.display()
+    );
     let mut file =
         std::fs::File::open(&gguf_path).map_err(|e| format!("open gguf: {e}"))?;
     let content =
         gguf_file::Content::read(&mut file).map_err(|e| format!("read gguf: {e}"))?;
-    let mut model = ModelWeights::from_gguf(content, &mut file, &device)
-        .map_err(|e| format!("load qwen3 weights: {e}"))?;
+    let mut model = match family {
+        Family::Qwen3 => LoadedModel::Qwen3(
+            quantized_qwen3::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load qwen3 weights: {e}"))?,
+        ),
+        Family::Qwen2 => LoadedModel::Qwen2(
+            quantized_qwen2::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load qwen2 weights: {e}"))?,
+        ),
+        Family::Llama3 | Family::Mistral => LoadedModel::Llama(
+            quantized_llama::ModelWeights::from_gguf(content, &mut file, &device)
+                .map_err(|e| format!("load llama weights: {e}"))?,
+        ),
+    };
 
     // Warm up: run one throwaway forward pass NOW so Metal compiles its shaders
     // during load (off the hot path). Without this, the very first enhancement
@@ -153,7 +270,8 @@ fn ensure_loaded(cache: &mut Option<(PathBuf, LoadedLlm)>, model_dir: &Path) -> 
     let tokenizer =
         Tokenizer::from_file(&tokenizer_path).map_err(|e| format!("load tokenizer: {e}"))?;
 
-    let eos_ids = ["<|im_end|>", "<|endoftext|>"]
+    let eos_ids = family
+        .eos_markers()
         .iter()
         .filter_map(|t| tokenizer.token_to_id(t))
         .collect::<Vec<_>>();
@@ -162,6 +280,7 @@ fn ensure_loaded(cache: &mut Option<(PathBuf, LoadedLlm)>, model_dir: &Path) -> 
         model_dir.to_path_buf(),
         LoadedLlm {
             model,
+            family,
             tokenizer,
             device,
             eos_ids,
@@ -180,12 +299,9 @@ fn run_generate(
     // The model is reused across calls, so wipe attention state each time.
     llm.model.clear_kv_cache();
 
-    // ChatML with thinking explicitly closed empty (`<think>\n\n</think>`) so
-    // Qwen3 skips its reasoning phase — faster, and no <think> trace can leak
-    // into the pasted text.
-    let prompt = format!(
-        "<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    );
+    // Wrap in the loaded family's chat template (ChatML for Qwen, Llama-3
+    // headers for Llama, [INST] for Mistral).
+    let prompt = llm.family.build_prompt(system, user);
 
     let encoding = llm
         .tokenizer
@@ -196,14 +312,28 @@ fn run_generate(
         return Err("empty prompt".into());
     }
 
-    // Cap output relative to the input length: reformatting can expand a bit,
-    // but never runs away. Hard wall-clock guard below in case it still does.
+    // Output budget. Reformatting scales with the input, but command mode ("write
+    // me an email…") produces a NEW artifact far longer than the short input, so
+    // the floor must be generous enough for a full email/note — otherwise the
+    // output is truncated mid-sentence. The model emits EOS when genuinely done
+    // (short cleanups stop early regardless), so a high cap only bounds runaways;
+    // the wall-clock guard below is the hard backstop.
     let user_len = llm
         .tokenizer
         .encode(user, false)
         .map(|e| e.get_ids().len())
         .unwrap_or(64);
-    let max_new = ((user_len as f32 * 1.8) as usize).clamp(32, 512);
+    // Honor the user's setting: -1 → unconstrained (a huge cap; the wall-clock
+    // guard below is the real stop), positive → that exact cap, 0 → auto (scale
+    // to the input, the default that suits both short cleanups and emails).
+    let max_new = match params.max_tokens {
+        -1 => usize::MAX,
+        n if n > 0 => n as usize,
+        _ => ((user_len as f32 * 2.0) as usize).clamp(320, 768),
+    };
+
+    // Internal hard backstop, scaled to the requested budget.
+    let time_budget = gen_time_budget(params.max_tokens);
 
     let seed = 42;
     let sampling = if params.temperature <= 0.0 {
@@ -235,9 +365,12 @@ fn run_generate(
             break;
         }
         out_tokens.push(next);
-        if start.elapsed() > Duration::from_secs(12) {
+        // Hard backstop against a runaway. Return an error (not the partial) so
+        // the caller falls back to the raw transcript rather than pasting a
+        // truncated artifact.
+        if start.elapsed() > time_budget {
             log::warn!("[llm] generation wall-clock guard tripped");
-            break;
+            return Err("enhancement exceeded time budget".into());
         }
         let input = Tensor::new(&[next], device)
             .and_then(|t| t.unsqueeze(0))
@@ -482,6 +615,22 @@ formatting, and whether markdown is appropriate."
     out
 }
 
+/// Wall-clock budget for one generation, derived from the token setting so that
+/// a larger/unconstrained cap gets proportionally longer to finish instead of
+/// being cut off and discarded. Conservatively assumes ~20 tok/s (worst case,
+/// 1.7B on Metal) and always allows at least the default window. Even
+/// "unconstrained" is time-bounded so the paste can never hang forever.
+pub fn gen_time_budget(max_tokens: i32) -> Duration {
+    const DEFAULT_SECS: u64 = 14;
+    const CEILING_SECS: u64 = 180;
+    let secs = match max_tokens {
+        -1 => 90, // unconstrained: generous but finite
+        n if n > 0 => (n as u64 / 20).max(DEFAULT_SECS),
+        _ => DEFAULT_SECS, // auto
+    };
+    Duration::from_secs(secs.min(CEILING_SECS))
+}
+
 /// Maps an intensity label to a sampling temperature.
 pub fn temperature_for(intensity: &str) -> f32 {
     match intensity {
@@ -562,7 +711,7 @@ mod tests {
                 &dir,
                 &sys,
                 input,
-                GenParams { temperature: temperature_for(intensity) },
+                GenParams { temperature: temperature_for(intensity), max_tokens: 0 },
                 Duration::from_secs(90),
             )
             .expect("enhance failed");
