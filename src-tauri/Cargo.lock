@@ -3982,6 +3982,8 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
  "cpal",
  "enigo",
  "env_logger",

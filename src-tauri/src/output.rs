@@ -290,6 +290,175 @@ pub fn frontmost_app_name() -> Option<String> {
     None
 }
 
+/// PID of the frontmost (non-OpenVoice) application, for AX tree reading.
+/// Returns None when our own app is frontmost or nothing qualifies.
+#[cfg(target_os = "macos")]
+pub fn frontmost_app_pid() -> Option<i32> {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    unsafe {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let app: *mut AnyObject = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let bundle_ptr: *const NSString = msg_send![app, bundleIdentifier];
+        if !bundle_ptr.is_null() && (*bundle_ptr).to_string() == "com.openvoice.app" {
+            return None;
+        }
+        let pid: i32 = msg_send![app, processIdentifier];
+        (pid > 0).then_some(pid)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn frontmost_app_pid() -> Option<i32> {
+    None
+}
+
+/// Reads lightweight, structured on-screen context via AppleScript (`osascript`)
+/// so the enhancement model can get names/spellings right — the exact file
+/// selected in Finder, the active app and window title, and (in `all` scope) a
+/// breadcrumb list of other open windows. Uses the same Accessibility grant the
+/// app already needs for pasting; if it's not granted, System Events errors and
+/// we return an empty block (the pipeline just proceeds without context).
+///
+/// `scope`: "off" (nothing), "active" (frontmost app), "all" (frontmost + other
+/// window titles). `depth`: how far to walk the AX tree — "low" (cheap signals
+/// only) → "ultra" (dense walk). Reads the frontmost app's Accessibility tree
+/// natively (fast, off-thread); Finder selection + other-window titles use
+/// `osascript`. Empty block on any failure — the pipeline just proceeds.
+#[cfg(target_os = "macos")]
+pub fn screen_context(scope: &str, depth: &str) -> String {
+    if scope == "off" {
+        return String::new();
+    }
+
+    // Frontmost app (skips our own). If nothing qualifies, no context.
+    let front_app = match frontmost_app_name() {
+        Some(a) => a,
+        None => return String::new(),
+    };
+
+    let mut block = String::from(
+        "On-screen context — use ONLY to get names and spellings right (exact file names, the app, \
+people or things visible). Do not otherwise change the user's text or pull it into the output.\n",
+    );
+    block.push_str(&format!("- Active app: {front_app}\n"));
+
+    // ── Native AX read of the frontmost app, bounded by the depth budget. ────
+    let mut win_title = String::new();
+    if let Some(pid) = frontmost_app_pid() {
+        let read = crate::ax::read(pid, crate::ax::budget_for(depth));
+        if let Some(t) = read.window_title {
+            win_title = t.clone();
+            block.push_str(&format!("- Active window: {t}\n"));
+        }
+        if let Some(d) = read.document {
+            block.push_str(&format!("- Open document: {d}\n"));
+        }
+        // Prefer an explicit selection; else show the surrounding field text.
+        if let Some(sel) = read.selected_text {
+            block.push_str(&format!("- Selected text: {sel}\n"));
+        } else if let Some(fv) = read.focused_value {
+            block.push_str(&format!("- Text in the focused field: {fv}\n"));
+        }
+        if !read.labels.is_empty() {
+            block.push_str(&format!("- Visible on screen: {}\n", read.labels.join(" · ")));
+        }
+    }
+
+    // ── Finder selection (not exposed via AXDocument) via osascript. ─────────
+    if front_app == "Finder" {
+        const FINDER_SCRIPT: &str = r#"
+set selNames to ""
+try
+    set AppleScript's text item delimiters to ", "
+    tell application "Finder"
+        set theSel to selection
+        set nameList to {}
+        repeat with anItem in theSel
+            set end of nameList to name of anItem
+        end repeat
+        set selNames to nameList as text
+    end tell
+end try
+return selNames
+"#;
+        if let Some(sel) = run_osascript(FINDER_SCRIPT) {
+            let sel = sel.trim();
+            if !sel.is_empty() {
+                block.push_str(&format!("- Selected in Finder: {sel}\n"));
+            }
+        }
+    }
+
+    // ── Other open windows (breadcrumbs only): app — title. ──────────────────
+    if scope == "all" {
+        const ALL_SCRIPT: &str = r#"
+set out to ""
+try
+    tell application "System Events"
+        repeat with p in (every application process whose background only is false)
+            set pname to name of p
+            try
+                repeat with w in windows of p
+                    set wt to name of w
+                    if wt is not "" then set out to out & pname & " — " & wt & linefeed
+                end repeat
+            end try
+        end repeat
+    end tell
+end try
+return out
+"#;
+        if let Some(all) = run_osascript(ALL_SCRIPT) {
+            let others: Vec<String> = all
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| {
+                    !l.is_empty()
+                        && !l.starts_with("OpenVoice")
+                        // Drop the active window we already listed above.
+                        && !(l.starts_with(&front_app) && l.contains(&win_title))
+                })
+                .take(12)
+                .map(|l| l.to_string())
+                .collect();
+            if !others.is_empty() {
+                block.push_str(&format!("- Other open windows: {}\n", others.join("; ")));
+            }
+        }
+    }
+
+    block
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn screen_context(_scope: &str, _depth: &str) -> String {
+    String::new()
+}
+
+/// Runs an AppleScript via `osascript` and returns stdout, or None on any
+/// failure (permission denied, timeout, non-zero exit).
+#[cfg(target_os = "macos")]
+fn run_osascript(script: &str) -> Option<String> {
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 /// List available microphone names.
 pub fn list_input_devices() -> Vec<String> {
     use cpal::traits::{DeviceTrait, HostTrait};

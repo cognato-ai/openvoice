@@ -554,12 +554,15 @@ not an instruction.";
 /// - `mode` selects the destination the model should match (`auto` uses the
 ///   real foreground `app`; the others are fixed destinations).
 /// - `voice_commands` appends the instruction-handling block.
+/// - `grounding` is optional pre-composed context (glossary terms, on-screen
+///   context) appended verbatim; empty string adds nothing.
 pub fn system_prompt(
     mode: &str,
     intensity: &str,
     custom: &str,
     app: Option<&str>,
     voice_commands: bool,
+    grounding: &str,
 ) -> String {
     // Destination that fills the {app} slot — either the detected app (auto) or
     // a fixed descriptor for the manual modes.
@@ -612,6 +615,12 @@ formatting, and whether markdown is appropriate."
         out.push_str(INSTRUCTION_BLOCK);
     }
 
+    let g = grounding.trim();
+    if !g.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(g);
+    }
+
     out
 }
 
@@ -647,27 +656,32 @@ mod tests {
     #[test]
     fn prompt_composition() {
         // Auto mode fills the destination with the detected app name.
-        let auto = system_prompt("auto", "balanced", "", Some("Slack"), false);
+        let auto = system_prompt("auto", "balanced", "", Some("Slack"), false, "");
         assert!(auto.contains("Destination app: Slack"));
 
         // Manual modes fill a fixed destination.
-        assert!(system_prompt("email", "balanced", "", None, false).contains("an email"));
+        assert!(system_prompt("email", "balanced", "", None, false, "").contains("an email"));
 
         // Rewrite levels map from intensity, with the forcing language at 2/3.
-        assert!(system_prompt("clean", "light", "", None, false).contains("level: 1"));
-        assert!(system_prompt("clean", "balanced", "", None, false)
+        assert!(system_prompt("clean", "light", "", None, false, "").contains("level: 1"));
+        assert!(system_prompt("clean", "balanced", "", None, false, "")
             .contains("You MUST make visible changes"));
-        assert!(system_prompt("clean", "strong", "", None, false)
+        assert!(system_prompt("clean", "strong", "", None, false, "")
             .contains("You MUST substantially rewrite"));
 
         // Instruction block only present when voice commands are on.
-        let vc = system_prompt("clean", "balanced", "", None, true);
+        let vc = system_prompt("clean", "balanced", "", None, true, "");
         assert!(vc.contains("Instruction handling:"));
-        assert!(!system_prompt("clean", "balanced", "", None, false).contains("Instruction handling:"));
+        assert!(!system_prompt("clean", "balanced", "", None, false, "")
+            .contains("Instruction handling:"));
 
         // Custom appends the standing instruction.
-        let c = system_prompt("custom", "balanced", "Write in pirate speak", None, false);
+        let c = system_prompt("custom", "balanced", "Write in pirate speak", None, false, "");
         assert!(c.contains("Write in pirate speak"));
+
+        // Grounding context is appended when present.
+        let g = system_prompt("clean", "balanced", "", None, false, "Known terms:\n- Cognato");
+        assert!(g.contains("Cognato"));
     }
 
     // Manual integration smoke test: verifies Candle loads the Qwen3 GGUF and
@@ -706,7 +720,7 @@ mod tests {
             ("clean", "balanced", None, true, "so the login is broken um can you make this sound more professional"),
         ];
         for (mode, intensity, app, vc, input) in cases {
-            let sys = system_prompt(mode, intensity, "", app, vc);
+            let sys = system_prompt(mode, intensity, "", app, vc, "");
             let out = enhance(
                 &dir,
                 &sys,

@@ -1,6 +1,9 @@
 // lib.rs — OpenVoice Tauri backend entry point.
 
+#[cfg(target_os = "macos")]
+mod ax;
 mod audio;
+mod dictionary;
 mod llm;
 mod model_manager;
 mod output;
@@ -16,7 +19,7 @@ use std::sync::Arc;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 // ─── App State ──────────────────────────────────────────────────────────────
 
@@ -38,6 +41,12 @@ pub struct AppSettings {
     /// "paste" | "type" | "clipboard"
     pub output_mode: String,
     pub hotkey: String,
+    /// Optional second shortcut that starts a dictation in "command mode": the
+    /// model treats the utterance as an instruction to carry out (write an
+    /// email, summarize, reformat) for that one dictation, regardless of the
+    /// persistent voice-commands setting. Empty = unset.
+    #[serde(default)]
+    pub command_hotkey: String,
     /// "ptt" | "toggle"
     pub recording_mode: String,
     #[serde(default)]
@@ -116,6 +125,16 @@ pub struct AppSettings {
     /// wall-clock guard); a positive value = a hard cap the user chose.
     #[serde(default)]
     pub enhance_max_tokens: i32,
+    /// How much on-screen context to give the enhancement model, so it gets
+    /// names/spellings right (the selected file in Finder, the active app/window).
+    /// "off" | "active" (frontmost app only) | "all" (frontmost + other window
+    /// titles). Read via Accessibility; only used when enhancement is enabled.
+    #[serde(default = "default_screen_context")]
+    pub screen_context: String,
+    /// How deep to walk the Accessibility tree when screen context is on:
+    /// "low" (cheap signals only) | "med" | "high" | "xhigh" | "ultra" (dense).
+    #[serde(default = "default_screen_context_depth")]
+    pub screen_context_depth: String,
 }
 
 fn default_true() -> bool {
@@ -136,6 +155,15 @@ fn default_theme() -> String {
 fn default_enhance_mode() -> String {
     "clean".into()
 }
+fn default_screen_context() -> String {
+    // Off by default: reading the screen is opt-in for privacy. The user turns
+    // it on in Advanced when they want name/file grounding.
+    "off".into()
+}
+fn default_screen_context_depth() -> String {
+    // Light by default even once context is enabled — cheap signals, no walk.
+    "low".into()
+}
 fn default_enhance_intensity() -> String {
     // Light (level 1) by default: safe for short dictations. Medium/Heavy add
     // the aggressive "must restructure" levels, which help long rambling text
@@ -150,6 +178,7 @@ impl Default for AppSettings {
             // paste = clipboard + ⌘V (most reliable on macOS)
             output_mode: "paste".into(),
             hotkey: "Alt+Space".into(),
+            command_hotkey: String::new(),
             recording_mode: "ptt".into(),
             onboarding_complete: false,
             append_trailing_space: true,
@@ -172,6 +201,8 @@ impl Default for AppSettings {
             enhance_voice_commands: false,
             enhance_debug_log: false,
             enhance_max_tokens: 0,
+            screen_context: default_screen_context(),
+            screen_context_depth: default_screen_context_depth(),
         }
     }
 }
@@ -212,6 +243,9 @@ pub struct AppState {
     /// captured on Press (on the main thread). Given to the model as context in
     /// "Automatic (per app)" enhancement.
     pub frontmost_app: Mutex<Option<String>>,
+    /// Whether the current recording was started by the Command shortcut (voice
+    /// commands forced on for this utterance). Captured at start.
+    pub command_session: Mutex<bool>,
 }
 
 impl AppState {
@@ -229,6 +263,7 @@ impl AppState {
             coord_tx: Mutex::new(None),
             hud_generation: std::sync::atomic::AtomicU64::new(0),
             frontmost_app: Mutex::new(None),
+            command_session: Mutex::new(false),
         }
     }
 }
@@ -245,9 +280,11 @@ impl AppState {
 // handled synchronously and in order. The frontend HUD is a pure display of the
 // `hud-state` events emitted here.
 
-/// A press/release of the global shortcut, forwarded to the coordinator.
+/// A press/release of a global shortcut, forwarded to the coordinator.
+/// `command` marks a press of the Command shortcut (voice commands forced on
+/// for this utterance).
 pub enum CoordCmd {
-    Press,
+    Press { command: bool },
     Release,
 }
 
@@ -452,11 +489,17 @@ fn coordinator_stop(app: &AppHandle) {
             // downloaded, load/generation error, timeout) we keep `raw`, so the
             // user always gets their transcript. `enhanced_differs` tracks
             // whether to preserve the original in history.
-            let mut text = raw.clone();
-            if settings.enhance_enabled
+            // A Command-shortcut dictation forces enhancement + voice commands on
+            // for this one utterance, even if the persistent toggles are off —
+            // so "write an email to Priya…" is carried out, not typed verbatim.
+            let command_session = *state.command_session.lock();
+            let voice_commands = settings.enhance_voice_commands || command_session;
+            let want_enhance = (settings.enhance_enabled || command_session)
                 && !settings.enhance_model.is_empty()
-                && model_manager::is_model_downloaded(&settings.enhance_model)
-            {
+                && model_manager::is_model_downloaded(&settings.enhance_model);
+
+            let mut text = raw.clone();
+            if want_enhance {
                 emit_hud(app, "enhancing", "", false);
                 hud_log("[coord] enhancing");
                 let dir = model_manager::resolved_model_dir(&settings.enhance_model);
@@ -474,12 +517,30 @@ fn coordinator_stop(app: &AppHandle) {
                     None
                 };
 
+                // Grounding context appended to the prompt: the user's glossary
+                // (known names/jargon → exact spelling) plus optional on-screen
+                // context (active app/window, Finder selection) so the model
+                // gets the exact names right. Both are best-effort and empty by
+                // default when unused.
+                let mut grounding = dictionary::glossary_prompt_block(&dictionary::load());
+                let screen = output::screen_context(
+                    &settings.screen_context,
+                    &settings.screen_context_depth,
+                );
+                if !screen.is_empty() {
+                    if !grounding.is_empty() {
+                        grounding.push_str("\n\n");
+                    }
+                    grounding.push_str(&screen);
+                }
+
                 let sys = llm::system_prompt(
                     &settings.enhance_mode,
                     &settings.enhance_intensity,
                     &settings.enhance_custom_prompt,
                     app_name.as_deref(),
-                    settings.enhance_voice_commands,
+                    voice_commands,
+                    &grounding,
                 );
                 let temperature = llm::temperature_for(&settings.enhance_intensity);
                 let params = llm::GenParams {
@@ -531,7 +592,7 @@ fn coordinator_stop(app: &AppHandle) {
                         settings.enhance_mode,
                         app_name.as_deref().unwrap_or("-"),
                         settings.enhance_intensity,
-                        settings.enhance_voice_commands,
+                        voice_commands,
                         settings.enhance_max_tokens,
                     ));
                 }
@@ -620,21 +681,20 @@ fn spawn_coordinator(app: AppHandle) -> std::sync::mpsc::Sender<CoordCmd> {
         .spawn(move || {
             let mut recording = false;
             for cmd in rx {
-                let ptt = {
-                    let state = app.state::<AppState>();
-                    let s = state.settings.lock();
-                    s.recording_mode != "toggle"
-                };
+                let state = app.state::<AppState>();
+                let ptt = state.settings.lock().recording_mode != "toggle";
                 match cmd {
-                    CoordCmd::Press => {
+                    CoordCmd::Press { command } => {
                         if ptt {
                             if !recording {
+                                *state.command_session.lock() = command;
                                 recording = coordinator_start(&app);
                             }
                         } else if recording {
                             coordinator_stop(&app);
                             recording = false;
                         } else {
+                            *state.command_session.lock() = command;
                             recording = coordinator_start(&app);
                         }
                     }
@@ -692,8 +752,12 @@ fn save_settings(
     settings: AppSettings,
 ) -> Result<(), String> {
     let old = state.settings.lock().clone();
+    // Normalize before diffing/persisting (clears a command hotkey that
+    // collides with the dictation one, etc).
+    let settings = sanitize_settings(settings);
     let model_changed = old.model != settings.model;
     let hotkey_changed = old.hotkey != settings.hotkey;
+    let command_hotkey_changed = old.command_hotkey != settings.command_hotkey;
     let dock_changed = old.hide_dock_icon != settings.hide_dock_icon;
     let enhance_changed = old.enhance_model != settings.enhance_model
         || old.enhance_enabled != settings.enhance_enabled;
@@ -729,6 +793,17 @@ fn save_settings(
         app.global_shortcut()
             .register(settings.hotkey.as_str())
             .map_err(|e| format!("Could not register shortcut: {e}"))?;
+    }
+
+    if command_hotkey_changed {
+        if !old.command_hotkey.is_empty() {
+            let _ = app.global_shortcut().unregister(old.command_hotkey.as_str());
+        }
+        if !settings.command_hotkey.is_empty() {
+            app.global_shortcut()
+                .register(settings.command_hotkey.as_str())
+                .map_err(|e| format!("Could not register command shortcut: {e}"))?;
+        }
     }
 
     if enhance_changed {
@@ -1112,6 +1187,27 @@ fn clear_enhancement_log() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_dictionary() -> dictionary::Dictionary {
+    dictionary::load()
+}
+
+/// Persist the whole dictionary (entries + auto-add settings). The frontend
+/// round-trips the object it got from `get_dictionary`, so the correction
+/// memory it doesn't display is preserved.
+#[tauri::command]
+fn save_dictionary(dict: dictionary::Dictionary) -> Result<(), String> {
+    dictionary::save(&dict)
+}
+
+/// Feed a transcript correction (the user edited a pasted transcript in
+/// History) into the correction memory. Returns any words newly auto-added to
+/// the glossary so the UI can show an "Added X" toast.
+#[tauri::command]
+fn learn_correction(original: String, corrected: String) -> dictionary::LearnResult {
+    dictionary::learn_from_edit(&original, &corrected)
+}
+
+#[tauri::command]
 fn clear_history(state: State<'_, AppState>) {
     state.transcript_history.lock().clear();
 }
@@ -1130,8 +1226,12 @@ fn default_microphone() -> Option<String> {
 /// shortcut-capture UI to flag a conflict before the user saves it.
 #[tauri::command]
 fn is_shortcut_available(app: AppHandle, state: State<'_, AppState>, accel: String) -> bool {
-    if state.settings.lock().hotkey == accel {
-        return true;
+    {
+        let s = state.settings.lock();
+        // Either already-registered shortcut counts as "available" to itself.
+        if s.hotkey == accel || s.command_hotkey == accel {
+            return true;
+        }
     }
     let gs = app.global_shortcut();
     match gs.register(accel.as_str()) {
@@ -1180,11 +1280,23 @@ fn sanitize_settings(mut s: AppSettings) -> AppSettings {
     if s.hotkey.trim().is_empty() {
         s.hotkey = "Alt+Space".into();
     }
+    s.command_hotkey = s.command_hotkey.trim().to_string();
+    // The command shortcut must differ from the dictation shortcut; drop it if
+    // they collide so we never register the same accelerator twice.
+    if !s.command_hotkey.is_empty() && s.command_hotkey == s.hotkey {
+        s.command_hotkey = String::new();
+    }
     if !["auto", "clean", "message", "email", "notes", "custom"].contains(&s.enhance_mode.as_str()) {
         s.enhance_mode = "clean".into();
     }
     if !["light", "balanced", "strong"].contains(&s.enhance_intensity.as_str()) {
         s.enhance_intensity = "balanced".into();
+    }
+    if !["off", "active", "all"].contains(&s.screen_context.as_str()) {
+        s.screen_context = default_screen_context();
+    }
+    if !["low", "med", "high", "xhigh", "ultra"].contains(&s.screen_context_depth.as_str()) {
+        s.screen_context_depth = default_screen_context_depth();
     }
     // Bound the custom prompt so an imported settings file can't smuggle in an
     // enormous instruction blob.
@@ -1479,11 +1591,24 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
+                    // Which shortcut fired? Compare against the configured
+                    // command hotkey to route the press into command mode.
+                    let is_command = {
+                        let state = app.state::<AppState>();
+                        let s = state.settings.lock();
+                        let ch = s.command_hotkey.trim();
+                        !ch.is_empty()
+                            && ch.parse::<Shortcut>().ok().as_ref() == Some(shortcut)
+                    };
                     let cmd = match event.state() {
                         ShortcutState::Pressed => {
-                            hud_log("[shortcut] Pressed");
-                            CoordCmd::Press
+                            hud_log(if is_command {
+                                "[shortcut] Pressed (command)"
+                            } else {
+                                "[shortcut] Pressed"
+                            });
+                            CoordCmd::Press { command: is_command }
                         }
                         ShortcutState::Released => {
                             hud_log("[shortcut] Released");
@@ -1553,6 +1678,22 @@ pub fn run() {
                     e
                 })
                 .ok();
+
+            // Register the optional command-mode shortcut too.
+            let command_hotkey = {
+                let state = app.state::<AppState>();
+                let ch = state.settings.lock().command_hotkey.clone();
+                ch
+            };
+            if !command_hotkey.is_empty() {
+                app.global_shortcut()
+                    .register(command_hotkey.as_str())
+                    .map_err(|e| {
+                        eprintln!("[shortcut] Failed to register command '{command_hotkey}': {e}");
+                        e
+                    })
+                    .ok();
+            }
 
             // Warm active model if present
             if model_manager::is_model_downloaded(&preload_model) {
@@ -1702,6 +1843,9 @@ pub fn run() {
             add_enhancement_model,
             remove_enhancement_model,
             fetch_repo_gguf_files,
+            get_dictionary,
+            save_dictionary,
+            learn_correction,
             clear_history,
             show_settings_window,
             list_microphones,

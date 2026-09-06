@@ -37,6 +37,7 @@ interface AppSettings {
   model: string;
   output_mode: string;
   hotkey: string;
+  command_hotkey?: string;
   recording_mode: string;
   onboarding_complete: boolean;
   append_trailing_space?: boolean;
@@ -59,6 +60,8 @@ interface AppSettings {
   enhance_voice_commands?: boolean;
   enhance_debug_log?: boolean;
   enhance_max_tokens?: number;
+  screen_context?: string;
+  screen_context_depth?: string;
 }
 
 const LANGUAGES: [string, string][] = [
@@ -118,8 +121,34 @@ interface DownloadState {
   error?: string;
 }
 
-type Tab = "models" | "general" | "enhance" | "history" | "advanced" | "permissions" | "about";
+type Tab =
+  | "models"
+  | "general"
+  | "enhance"
+  | "dictionary"
+  | "history"
+  | "advanced"
+  | "permissions"
+  | "about";
 type ModelFilter = "all" | "runnable" | "recommended" | "downloaded";
+
+interface DictEntry {
+  word: string;
+  soundsLike: string;
+  auto: boolean;
+}
+interface Correction {
+  heard: string;
+  corrected: string;
+  count: number;
+  lastSeen: number;
+}
+interface Dictionary {
+  entries: DictEntry[];
+  autoAdd: boolean;
+  threshold: number;
+  corrections: Correction[];
+}
 
 function formatBytes(b: number) {
   if (b === 0) return "0 B";
@@ -195,9 +224,15 @@ function codeToAccelKey(code: string): string | null {
 function ShortcutRecorder({
   value,
   onSave,
+  label = "Global shortcut",
+  hint = "Click, then press your shortcut.",
+  allowClear = false,
 }: {
   value: string;
   onSave: (accel: string) => void;
+  label?: string;
+  hint?: string;
+  allowClear?: boolean;
 }) {
   const [recording, setRecording] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -237,27 +272,43 @@ function ShortcutRecorder({
 
   return (
     <div className="s-field">
-      <label className="s-label">Global shortcut</label>
-      <button
-        type="button"
-        className="s-input"
-        style={{ textAlign: "left", cursor: "pointer" }}
-        onClick={() => {
-          setConflict(false);
-          setRecording(true);
-        }}
-      >
-        {recording ? "Press a key combo… (Esc to cancel)" : hotkeyLabel(value)}
-      </button>
+      <label className="s-label">{label}</label>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          type="button"
+          className="s-input"
+          style={{ textAlign: "left", cursor: "pointer", flex: 1 }}
+          onClick={() => {
+            setConflict(false);
+            setRecording(true);
+          }}
+        >
+          {recording
+            ? "Press a key combo… (Esc to cancel)"
+            : value
+              ? hotkeyLabel(value)
+              : "Not set"}
+        </button>
+        {allowClear && value && !recording && (
+          <button
+            type="button"
+            className="s-btn s-btn--ghost"
+            onClick={() => {
+              setConflict(false);
+              onSave("");
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
       {checking && <p className="s-help">Checking availability…</p>}
       {conflict && (
         <p className="s-help" style={{ color: "var(--danger)" }}>
           That combo is already in use — try another.
         </p>
       )}
-      {!recording && !checking && !conflict && (
-        <p className="s-help">Click, then press your shortcut.</p>
-      )}
+      {!recording && !checking && !conflict && <p className="s-help">{hint}</p>}
     </div>
   );
 }
@@ -280,6 +331,12 @@ export default function Settings() {
   const [importError, setImportError] = useState("");
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [showRawId, setShowRawId] = useState<number | null>(null);
+  const [dict, setDict] = useState<Dictionary | null>(null);
+  const [newWord, setNewWord] = useState("");
+  const [newSounds, setNewSounds] = useState("");
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editText, setEditText] = useState("");
+  const [learnToast, setLearnToast] = useState<string | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -369,13 +426,80 @@ export default function Settings() {
       enhance_voice_commands: false,
       enhance_debug_log: false,
       enhance_max_tokens: 0,
+      screen_context: "off",
+      screen_context_depth: "low",
       ...s,
     });
     setPerms(p);
     setHistory(h);
     setMics(micList);
     setCatalogTotal(stats.totalListed || m.length);
+    invoke<Dictionary>("get_dictionary")
+      .then(setDict)
+      .catch(() => {});
   }, []);
+
+  // Dictionary helpers. Every change persists the whole object (which preserves
+  // the correction memory the UI doesn't display) and updates local state.
+  const persistDict = useCallback(async (next: Dictionary) => {
+    setDict(next);
+    try {
+      await invoke("save_dictionary", { dict: next });
+    } catch {
+      /* keep local state; a reopen will re-sync */
+    }
+  }, []);
+
+  const addDictWord = useCallback(() => {
+    const word = newWord.trim();
+    if (!word || !dict) return;
+    if (dict.entries.some((e) => e.word.toLowerCase() === word.toLowerCase())) {
+      setNewWord("");
+      setNewSounds("");
+      return;
+    }
+    persistDict({
+      ...dict,
+      entries: [...dict.entries, { word, soundsLike: newSounds.trim(), auto: false }],
+    });
+    setNewWord("");
+    setNewSounds("");
+  }, [newWord, newSounds, dict, persistDict]);
+
+  const removeDictWord = useCallback(
+    (word: string) => {
+      if (!dict) return;
+      persistDict({ ...dict, entries: dict.entries.filter((e) => e.word !== word) });
+    },
+    [dict, persistDict],
+  );
+
+  // Called when the user finishes editing a pasted transcript in History. Feeds
+  // the correction to the memory and, if a word was auto-added, shows a toast.
+  const saveTranscriptEdit = useCallback(
+    async (h: TranscriptEntry) => {
+      const corrected = editText.trim();
+      setEditId(null);
+      if (!corrected || corrected === h.text) return;
+      setHistory((cur) =>
+        cur.map((e) => (e.id === h.id ? { ...e, text: corrected } : e)),
+      );
+      try {
+        const res = await invoke<{ added: string[] }>("learn_correction", {
+          original: h.text,
+          corrected,
+        });
+        if (res.added.length > 0) {
+          setLearnToast(`Added ${res.added.join(", ")} to your dictionary`);
+          setTimeout(() => setLearnToast(null), 4000);
+          invoke<Dictionary>("get_dictionary").then(setDict).catch(() => {});
+        }
+      } catch {
+        /* correction memory is best-effort */
+      }
+    },
+    [editText],
+  );
 
   useEffect(() => {
     const theme = settings?.theme ?? "system";
@@ -772,6 +896,7 @@ export default function Settings() {
             ["models", "Models"],
             ["general", "General"],
             ["enhance", "Enhancement"],
+            ["dictionary", "Dictionary"],
             ["history", "History"],
             ["advanced", "Advanced"],
             ["permissions", "Permissions"],
@@ -955,8 +1080,17 @@ export default function Settings() {
               </div>
 
               <ShortcutRecorder
+                label="Dictation shortcut"
                 value={settings.hotkey}
                 onSave={(accel) => setSettings({ ...settings, hotkey: accel })}
+              />
+
+              <ShortcutRecorder
+                label="Command shortcut (optional)"
+                hint="A second shortcut that runs command mode: speak an instruction like “write an email to Priya about the launch” and OpenVoice carries it out instead of typing it verbatim — just for that dictation. Needs an enhancement model."
+                value={settings.command_hotkey ?? ""}
+                allowClear
+                onSave={(accel) => setSettings({ ...settings, command_hotkey: accel })}
               />
 
               <div className="s-field">
@@ -1023,6 +1157,146 @@ export default function Settings() {
           </>
         )}
 
+        {tab === "dictionary" && dict && (
+          <>
+            <header className="s-main__header">
+              <h1 className="s-main__title">Dictionary</h1>
+              <p className="s-main__desc">
+                Teach OpenVoice the names, jargon, and spellings you use. When enhancement is
+                on, these are given to the model so it spells them exactly the way you want.
+              </p>
+            </header>
+            <div className="s-main__body">
+              {/* Add a word */}
+              <div className="s-card">
+                <div className="s-card__title" style={{ marginBottom: 8 }}>
+                  Add a word or phrase
+                </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                    <label className="s-help" style={{ display: "block", marginBottom: 4 }}>
+                      Word / spelling
+                    </label>
+                    <input
+                      className="s-input"
+                      placeholder="e.g. Cognato"
+                      value={newWord}
+                      onChange={(e) => setNewWord(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && addDictWord()}
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+                  <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                    <label className="s-help" style={{ display: "block", marginBottom: 4 }}>
+                      Sounds like <span style={{ opacity: 0.5 }}>(optional)</span>
+                    </label>
+                    <input
+                      className="s-input"
+                      placeholder="e.g. cognate"
+                      value={newSounds}
+                      onChange={(e) => setNewSounds(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && addDictWord()}
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+                  <button
+                    className="s-btn s-btn--primary"
+                    onClick={addDictWord}
+                    disabled={!newWord.trim()}
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+
+              {/* Auto-learn settings */}
+              <div className="s-card">
+                <label style={{ display: "flex", gap: 12, alignItems: "center", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={dict.autoAdd}
+                    onChange={(e) => persistDict({ ...dict, autoAdd: e.target.checked })}
+                  />
+                  <div>
+                    <div className="s-card__title">Learn from my corrections</div>
+                    <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                      When you fix a word in a transcript below, OpenVoice remembers it. After the
+                      same fix a few times, the word is added here automatically.
+                    </p>
+                  </div>
+                </label>
+                {dict.autoAdd && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
+                    <span className="s-help">Add a word after</span>
+                    <input
+                      type="number"
+                      className="s-input"
+                      min={1}
+                      max={20}
+                      value={dict.threshold}
+                      onChange={(e) =>
+                        persistDict({
+                          ...dict,
+                          threshold: Math.min(20, Math.max(1, Number(e.target.value) || 1)),
+                        })
+                      }
+                      style={{ width: 64 }}
+                    />
+                    <span className="s-help">corrections</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Word list */}
+              <div className="s-section-label">
+                Your words <span style={{ opacity: 0.5 }}>({dict.entries.length})</span>
+              </div>
+              {dict.entries.length === 0 && (
+                <p className="s-help">
+                  No words yet. Add names or jargon above, or let OpenVoice learn them from your
+                  corrections.
+                </p>
+              )}
+              {dict.entries.map((e) => (
+                <div
+                  className="s-card"
+                  key={e.word}
+                  style={{ display: "flex", alignItems: "center", gap: 12 }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="s-card__title" style={{ fontSize: 13 }}>
+                      {e.word}
+                      {e.auto && (
+                        <span
+                          style={{
+                            marginLeft: 8,
+                            fontSize: 11,
+                            fontWeight: 400,
+                            opacity: 0.55,
+                          }}
+                        >
+                          learned
+                        </span>
+                      )}
+                    </div>
+                    {e.soundsLike && (
+                      <p className="s-card__desc" style={{ marginBottom: 0 }}>
+                        sounds like “{e.soundsLike}”
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    className="s-btn s-btn--ghost s-btn--sm"
+                    onClick={() => removeDictWord(e.word)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
         {tab === "history" && (
           <>
             <header className="s-main__header">
@@ -1054,48 +1328,107 @@ export default function Settings() {
                   </p>
                 </div>
               )}
+              {learnToast && (
+                <div
+                  className="s-card"
+                  style={{ borderColor: "var(--accent, #6b8afd)", fontSize: 13 }}
+                >
+                  ✓ {learnToast}
+                </div>
+              )}
               {history.map((h) => {
                 const showingRaw = showRawId === h.id && !!h.raw;
                 const shown = showingRaw ? (h.raw as string) : h.text;
+                const editing = editId === h.id;
                 return (
                   <div key={h.id} className="s-card">
-                    <div className="s-card__top">
-                      <div className="s-card__title" style={{ fontWeight: 500, fontSize: 13 }}>
-                        {shown || "—"}
-                      </div>
-                      <button
-                        className="s-btn s-btn--ghost s-btn--sm"
-                        onClick={() => {
-                          invoke("copy_text", { text: shown })
-                            .then(() => {
-                              setCopiedId(h.id);
-                              setTimeout(() => setCopiedId((cur) => (cur === h.id ? null : cur)), 1500);
-                            })
-                            .catch(() => {});
-                        }}
-                      >
-                        {copiedId === h.id ? "Copied ✓" : "Copy"}
-                      </button>
-                    </div>
-                    <p
-                      className="s-help"
-                      title={new Date(h.timestamp * 1000).toLocaleString()}
-                      style={{ display: "flex", gap: 10, alignItems: "center" }}
-                    >
-                      <span>{relativeTime(h.timestamp)}</span>
-                      {h.raw && (
-                        <>
-                          <span style={{ opacity: 0.4 }}>·</span>
+                    {editing ? (
+                      <>
+                        <textarea
+                          className="s-input"
+                          value={editText}
+                          onChange={(e) => setEditText(e.target.value)}
+                          autoFocus
+                          rows={Math.min(6, Math.max(2, editText.split("\n").length))}
+                          style={{ width: "100%", resize: "vertical", fontSize: 13 }}
+                        />
+                        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                           <button
-                            className="s-linkish"
-                            onClick={() => setShowRawId((cur) => (cur === h.id ? null : h.id))}
+                            className="s-btn s-btn--primary s-btn--sm"
+                            onClick={() => saveTranscriptEdit(h)}
                           >
-                            {showingRaw ? "Show enhanced" : "Show original"}
+                            Save
                           </button>
-                        </>
-                      )}
-                      {showingRaw && <span style={{ opacity: 0.5 }}>original transcript</span>}
-                    </p>
+                          <button
+                            className="s-btn s-btn--ghost s-btn--sm"
+                            onClick={() => setEditId(null)}
+                          >
+                            Cancel
+                          </button>
+                          <span className="s-help" style={{ alignSelf: "center" }}>
+                            Fixing a name here teaches your dictionary.
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="s-card__top">
+                          <div className="s-card__title" style={{ fontWeight: 500, fontSize: 13 }}>
+                            {shown || "—"}
+                          </div>
+                          <div style={{ display: "flex", gap: 4 }}>
+                            <button
+                              className="s-btn s-btn--ghost s-btn--sm"
+                              onClick={() => {
+                                setEditId(h.id);
+                                setEditText(h.text);
+                              }}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              className="s-btn s-btn--ghost s-btn--sm"
+                              onClick={() => {
+                                invoke("copy_text", { text: shown })
+                                  .then(() => {
+                                    setCopiedId(h.id);
+                                    setTimeout(
+                                      () => setCopiedId((cur) => (cur === h.id ? null : cur)),
+                                      1500,
+                                    );
+                                  })
+                                  .catch(() => {});
+                              }}
+                            >
+                              {copiedId === h.id ? "Copied ✓" : "Copy"}
+                            </button>
+                          </div>
+                        </div>
+                        <p
+                          className="s-help"
+                          title={new Date(h.timestamp * 1000).toLocaleString()}
+                          style={{ display: "flex", gap: 10, alignItems: "center" }}
+                        >
+                          <span>{relativeTime(h.timestamp)}</span>
+                          {h.raw && (
+                            <>
+                              <span style={{ opacity: 0.4 }}>·</span>
+                              <button
+                                className="s-linkish"
+                                onClick={() =>
+                                  setShowRawId((cur) => (cur === h.id ? null : h.id))
+                                }
+                              >
+                                {showingRaw ? "Show enhanced" : "Show original"}
+                              </button>
+                            </>
+                          )}
+                          {showingRaw && (
+                            <span style={{ opacity: 0.5 }}>original transcript</span>
+                          )}
+                        </p>
+                      </>
+                    )}
                   </div>
                 );
               })}
@@ -1503,6 +1836,79 @@ export default function Settings() {
               <p className="s-main__desc">Fine-tune transcription, overlay, and system behaviour.</p>
             </header>
             <div className="s-main__body">
+              <div className="s-section-label">Context</div>
+
+              <div className="s-field">
+                <label className="s-label">On-screen context</label>
+                <select
+                  className="s-select"
+                  value={settings.screen_context ?? "off"}
+                  onChange={(e) => setSettings({ ...settings, screen_context: e.target.value })}
+                >
+                  <option value="off">Off</option>
+                  <option value="active">Active app only</option>
+                  <option value="all">All open windows</option>
+                </select>
+                <p className="s-help">
+                  When enhancement is on, OpenVoice can read what's on screen — the app and window
+                  you're in, and the file selected in Finder — so it spells names and files exactly
+                  right. "Active app only" reads just the frontmost window; "All open windows" also
+                  passes the titles of your other windows. Read locally via Accessibility, used for a
+                  single dictation, and never stored or sent anywhere.
+                </p>
+              </div>
+
+              {settings.screen_context !== "off" &&
+                (() => {
+                  const DEPTHS = ["low", "med", "high", "xhigh", "ultra"];
+                  const LABELS = ["Low", "Medium", "High", "Very high", "Ultra"];
+                  const cur = settings.screen_context_depth ?? "low";
+                  const idx = Math.max(0, DEPTHS.indexOf(cur));
+                  return (
+                    <div className="s-field">
+                      <label className="s-label">
+                        Context depth — {LABELS[idx]}
+                      </label>
+                      <input
+                        className="s-input"
+                        type="range"
+                        min={0}
+                        max={4}
+                        step={1}
+                        value={idx}
+                        onChange={(e) =>
+                          setSettings({
+                            ...settings,
+                            screen_context_depth: DEPTHS[Number(e.target.value)],
+                          })
+                        }
+                      />
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          fontSize: 11,
+                          opacity: 0.6,
+                          marginTop: 2,
+                        }}
+                      >
+                        {LABELS.map((l) => (
+                          <span key={l}>{l}</span>
+                        ))}
+                      </div>
+                      <p className="s-help">
+                        How deeply OpenVoice reads the screen's structure. <b>Low</b> grabs just the
+                        essentials — window title, open document, and the text you've selected.
+                        Higher levels walk further into the app to pick up tab names, headings, and
+                        visible labels; <b>Ultra</b> does a dense sweep. More depth = more accurate
+                        names but a little slower, and it reads more of what's on screen — so keep it
+                        low unless you need it. Custom-rendered apps (some editors, terminals) expose
+                        little at any level.
+                      </p>
+                    </div>
+                  );
+                })()}
+
               <div className="s-section-label">Transcription</div>
 
               <label className="s-card s-card--clickable" style={{ display: "flex", gap: 12, alignItems: "center" }}>
@@ -1968,6 +2374,14 @@ function NavIcon({ id }: { id: Tab }) {
         <svg {...common}>
           <path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2 2-5z" />
           <path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9L18 15z" />
+        </svg>
+      );
+    case "dictionary":
+      return (
+        <svg {...common}>
+          <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H19a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H5.5A1.5 1.5 0 0 0 4 20.5z" />
+          <line x1="8" y1="8" x2="15" y2="8" />
+          <line x1="8" y1="11.5" x2="13" y2="11.5" />
         </svg>
       );
     case "history":
